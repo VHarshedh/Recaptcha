@@ -1,0 +1,38 @@
+{
+  "name": "recaptcha-attestation",
+  "version": "1.0.0",
+  "description": "Polymorphic client attestation and air-gapped cryptographic risk scoring microservice",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./compiler": "./compiler/index.js",
+    "./attestation": "./attestation/index.js",
+    "./pow": "./pow/index.js",
+    "./client": "./client/index.js"
+  },
+  "scripts": {
+    "test": "node test_all.js",
+    "test:security": "node test_security.js",
+    "test:adaptive": "node test_adaptive_e2e.js",
+    "test:compiler": "node compiler/test_compiler.js",
+    "test:attestation": "node attestation/test_attestation.js",
+    "test:pow": "node test_pow_verifier.js && node test_pow_inline.js",
+    "test:e2e": "node test_e2e_crypto.js",
+    "start": "node attestation/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "recaptcha",
+    "attestation",
+    "polymorphic",
+    "ecdh",
+    "ed25519",
+    "proof-of-work",
+    "risk-scoring",
+    "anti-bot"
+  ],
+  "author": "",
+  "license": "ISC"
+}

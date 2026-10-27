@@ -28,6 +28,7 @@ const { generateEphemeralKeyPair, generateClientECDHCode } = require("./ecdh_ses
 /* ------------------------------------------------------------------ */
 
 const ROOT_DIR   = path.join(__dirname, "..");
+const CLIENT_DIR = path.join(__dirname, "..", "client");
 const SOURCE_LIST = [
   "runtime_integrity.js",
   "hardware_consistency.js",
@@ -241,7 +242,13 @@ function compile(options = {}) {
   } else {
     const modules = [];
     for (const file of sourceFiles) {
-      const fp = path.join(sourceDir, file);
+      let fp = path.join(sourceDir, file);
+      if (!fs.existsSync(fp)) {
+        fp = path.join(sourceDir, "client", file);
+      }
+      if (!fs.existsSync(fp)) {
+        fp = path.join(CLIENT_DIR, file);
+      }
       if (fs.existsSync(fp)) {
         modules.push(preprocess(fs.readFileSync(fp, "utf-8")));
       }
@@ -328,4 +335,4 @@ function compile(options = {}) {
 
 /* ------------------------------------------------------------------ */
 
-module.exports = { compile, createNameGenerator, preprocess, ROOT_DIR };
+module.exports = { compile, createNameGenerator, preprocess, ROOT_DIR, CLIENT_DIR };
