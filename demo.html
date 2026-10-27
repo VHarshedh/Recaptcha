@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PoW Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f0f13; color: #e0e0e0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #1a1a24; border: 1px solid #2a2a3a; border-radius: 12px; padding: 2rem; max-width: 520px; width: 100%; }
+  h1 { font-size: 1.25rem; margin-bottom: 1.5rem; color: #8888ff; }
+  label { display: block; font-size: 0.85rem; color: #999; margin-bottom: 0.25rem; }
+  input, select { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #2a2a3a; border-radius: 6px; background: #12121a; color: #e0e0e0; font-size: 0.9rem; margin-bottom: 1rem; }
+  button { width: 100%; padding: 0.65rem; border: none; border-radius: 6px; background: #5555dd; color: #fff; font-size: 0.95rem; cursor: pointer; transition: background 0.2s; }
+  button:hover { background: #6666ee; }
+  button:disabled { background: #333; cursor: not-allowed; }
+  #log { margin-top: 1.25rem; font-family: 'Cascadia Code', monospace; font-size: 0.8rem; background: #12121a; border-radius: 6px; padding: 1rem; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #8f8; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⛏️ Proof-of-Work Demo</h1>
+
+  <label for="difficulty">Difficulty (leading zero bits)</label>
+  <select id="difficulty">
+    <option value="8">8  — instant (~256 hashes)</option>
+    <option value="12">12 — fast (~4 K hashes)</option>
+    <option value="16" selected>16 — moderate (~65 K hashes)</option>
+    <option value="20">20 — heavy (~1 M hashes)</option>
+    <option value="24">24 — extreme (~16 M hashes)</option>
+  </select>
+
+  <button id="btn">Start PoW Challenge</button>
+  <div id="log"></div>
+</div>
+
+<script src="pow_client.js"></script>
+<script>
+  const btn = document.getElementById("btn");
+  const logEl = document.getElementById("log");
+  const diffSel = document.getElementById("difficulty");
+
+  function log(msg) {
+    logEl.textContent += msg + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  btn.addEventListener("click", async () => {
+    logEl.textContent = "";
+    btn.disabled = true;
+
+    // Simulate server issuing a challenge.
+    const issuedAt = Date.now();
+    const challenge = issuedAt + "." + crypto.randomUUID().replace(/-/g, "");
+    const difficulty = Number(diffSel.value);
+
+    log(`Challenge : ${challenge}`);
+    log(`Difficulty: ${difficulty} leading zero bits`);
+    log(`Mining…\n`);
+
+    try {
+      const result = await solvePoW({
+        challenge,
+        difficulty,
+        onProgress: ({ nonce, elapsedMs }) => {
+          log(`  ⏳ ${nonce.toLocaleString()} hashes — ${elapsedMs} ms`);
+        },
+      });
+
+      log(`\n✅ Solved!`);
+      log(`  Nonce   : ${result.nonce}`);
+      log(`  Hash    : ${result.hash}`);
+      log(`  Duration: ${result.durationMs} ms`);
+    } catch (e) {
+      log(`\n❌ Error: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
