@@ -3,7 +3,7 @@
  *
  * Server side:  generate per-request P-256 key pairs, decrypt client payloads.
  * Client side:  generate JS code that performs ECDH + AES-GCM in-browser via
- *               Web Crypto API, making telemetry opaque to DevTools / proxies.
+ *               Web Crypto API. The executing client can still inspect telemetry.
  */
 
 "use strict";
@@ -46,13 +46,13 @@ function generateEphemeralKeyPair() {
  * encrypted telemetry submission.
  *
  * The generated function signature:
- *   async function <fnName>(payload, endpoint)
+ *   async function <fnName>(payload, endpoint, vmState)
  *
  * It performs:
  *   1. Import server's SPKI public key
  *   2. Generate ephemeral client EC key pair
  *   3. ECDH → 256-bit shared secret
- *   4. Derive AES-GCM key from shared bits
+ *   4. SHA-256(shared bits || signed big-endian 32-bit execution state)
  *   5. Encrypt JSON payload with AES-GCM (random 96-bit IV)
  *   6. POST { cpk, iv, ct, sid } to endpoint
  *
@@ -67,9 +67,8 @@ function generateClientECDHCode(serverPubKeyBase64, sessionId, fnName) {
   const name = fnName || "encryptAndSend";
 
   // The generated code captures pristine references to Web Crypto and
-  // encoding primitives BEFORE any application code can proxy them.
-  // All subsequent encryption uses these captured refs, preventing
-  // post-load JSON.stringify / crypto.subtle hooking attacks.
+  // encoding primitives at load time. Earlier scripts and a controlled client
+  // can still replace these; this is not a browser-authentication boundary.
   return `
 var _subtle = crypto["subtle"];
 var _jsonStringify = JSON["stringify"];
@@ -89,7 +88,7 @@ var _getRandomValues = crypto["getRandomValues"]["bind"](crypto);
   }
 })();
 
-async function ${name}(payloadObj, endpointUrl) {
+async function ${name}(payloadObj, endpointUrl, vmState) {
   var spkiB64 = "${serverPubKeyBase64}";
   var sessionId = "${sessionId}";
 
@@ -119,9 +118,13 @@ async function ${name}(payloadObj, endpointUrl) {
     256
   );
 
+  var keyMaterial = new Uint8Array(36);
+  keyMaterial["set"](new Uint8Array(sharedBits));
+  new DataView(keyMaterial["buffer"])["setInt32"](32, vmState, false);
+  var derivedBits = await _subtle["digest"]("SHA-256", keyMaterial);
   var aesKey = await _subtle["importKey"](
     "raw",
-    sharedBits,
+    derivedBits,
     { "name": "AES-GCM" },
     false,
     ["encrypt"]
@@ -179,7 +182,7 @@ async function ${name}(payloadObj, endpointUrl) {
  * @param {crypto.KeyObject} serverPrivateKey
  * @returns {Object} — the decrypted JSON payload
  */
-function decryptTelemetry(encrypted, serverPrivateKey) {
+function decryptTelemetry(encrypted, serverPrivateKey, expectedVmState) {
   // Decode base64 fields.
   const clientPubDer = Buffer.from(encrypted.cpk, "base64");
   const iv           = Buffer.from(encrypted.iv, "base64");
@@ -199,7 +202,7 @@ function decryptTelemetry(encrypted, serverPrivateKey) {
   });
 
   // Web Crypto deriveBits for P-256 returns the raw 32-byte X coordinate.
-  const aesKey = sharedSecret.subarray(0, 32);
+  const aesKey = deriveSessionKey(sharedSecret, expectedVmState);
 
   // AES-GCM: Web Crypto appends the 16-byte auth tag to the ciphertext.
   if (ciphertext.length < 16) {
@@ -221,7 +224,17 @@ function decryptTelemetry(encrypted, serverPrivateKey) {
 
 /* ------------------------------------------------------------------ */
 
+function deriveSessionKey(sharedSecret, vmState) {
+  if (!Number.isInteger(vmState) || vmState !== (vmState | 0)) {
+    throw new Error("missing or invalid execution state");
+  }
+  const state = Buffer.alloc(4);
+  state.writeInt32BE(vmState);
+  return crypto.createHash("sha256").update(sharedSecret).update(state).digest();
+}
+
 module.exports = {
+  deriveSessionKey,
   generateEphemeralKeyPair,
   generateClientECDHCode,
   decryptTelemetry,

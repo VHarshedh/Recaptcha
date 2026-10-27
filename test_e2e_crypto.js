@@ -5,7 +5,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { generateEphemeralKeyPair, decryptTelemetry } = require("./compiler/ecdh_session");
+const { generateEphemeralKeyPair, decryptTelemetry, deriveSessionKey } = require("./compiler/ecdh_session");
 const { generateChallenge, verifyPoW, countLeadingZeroBits } = require("./pow_verifier");
 const { computeScore } = require("./attestation/scorer");
 const { issueToken } = require("./attestation/token");
@@ -32,6 +32,7 @@ async function run() {
   console.log("Starting End-to-End Test...");
 
   // 1. Server generates ephemeral ECDH key pair and PoW challenge
+  const expectedVmState = -123456789;
   const serverKP = generateEphemeralKeyPair();
   const powChallenge = generateChallenge();
   const powDifficulty = 8; // fast for integration test
@@ -66,7 +67,7 @@ async function run() {
 
   const aesKey = await crypto.subtle.importKey(
     "raw",
-    sharedBits,
+    deriveSessionKey(Buffer.from(sharedBits), expectedVmState),
     { name: "AES-GCM" },
     false,
     ["encrypt"]
@@ -104,7 +105,7 @@ async function run() {
   console.log("3. Telemetry encrypted with AES-GCM. Ciphertext length:", wirePayload.ct.length);
 
   // 4. Server receives and decrypts payload using ECDH private key
-  const decrypted = decryptTelemetry(wirePayload, serverKP.privateKey);
+  const decrypted = decryptTelemetry(wirePayload, serverKP.privateKey, expectedVmState);
   console.log("4. Server decrypted telemetry successfully:");
   console.log("   Action:", decrypted.action);
 

@@ -17,7 +17,7 @@
 
 const crypto = require("node:crypto");
 const { publicKey } = require("./keys");
-const { maskIP } = require("./ip_mask");
+const { maskIP, getClientIP } = require("./ip_mask");
 const { NonceCache } = require("./nonce_cache");
 
 /* ------------------------------------------------------------------ */
@@ -226,10 +226,7 @@ function attestationMiddleware(opts = {}) {
     }
 
     // Determine client IP (respects X-Forwarded-For for reverse proxies).
-    const clientIP =
-      req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.socket?.remoteAddress ||
-      req.connection?.remoteAddress;
+    const clientIP = getClientIP(req);
 
     const result = verifyToken(token, { clientIP, action, minScore });
 

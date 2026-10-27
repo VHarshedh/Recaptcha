@@ -140,10 +140,7 @@ function generateDeadBlock(nameGen, stmts) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Insert `count` dead code blocks at random positions in the source.
- *
- * Injection points are chosen after lines ending with `;` or `}`,
- * which are safe locations between statements.
+ * Insert `count` randomized dead code blocks at the program boundary.
  *
  * @param {string}   source
  * @param {number}   count
@@ -156,34 +153,9 @@ function injectDeadCode(source, count, nameGen) {
     blocks.push(generateDeadBlock(nameGen));
   }
 
-  const lines = source.split("\n");
-
-  // Find safe injection points.
-  const candidates = [];
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed.endsWith(";") || trimmed.endsWith("}")) {
-      candidates.push(i);
-    }
-  }
-
-  // Pick random unique positions.
-  const available = [...candidates];
-  const chosen = [];
-  for (let i = 0; i < Math.min(count, available.length); i++) {
-    const idx = crypto.randomInt(available.length);
-    chosen.push(available[idx]);
-    available.splice(idx, 1);
-  }
-
-  // Sort descending so inserts don't shift earlier indices.
-  chosen.sort((a, b) => b - a);
-
-  for (let i = 0; i < chosen.length; i++) {
-    lines.splice(chosen[i] + 1, 0, blocks[i]);
-  }
-
-  return lines.join("\n");
+  // Only inject at the known program boundary. A line ending in } can be
+  // an object literal or the middle of an if/else or try/catch statement.
+  return blocks.join("\n") + "\n" + source;
 }
 
 /* ------------------------------------------------------------------ */

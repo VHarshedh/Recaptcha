@@ -17,6 +17,7 @@
 
 "use strict";
 
+const { extractHeaderProfile, verifyHeaderConsistency } = require("../attestation/header_check");
 const http = require("node:http");
 const { compile } = require("./pipeline");
 const { decryptTelemetry } = require("./ecdh_session");
@@ -92,7 +93,7 @@ function createMiddleware(opts = {}) {
       const { challenge, issuedAt } = generateChallenge();
       const difficulty = 16;
 
-      const { bundle, buildId, ecdhKeyPair, stats } = compile({
+      const { bundle, buildId, ecdhKeyPair, stats, expectedVmState } = compile({
         attestEndpoint,
         deadCodeBlocks,
         powChallenge: challenge,
@@ -103,6 +104,8 @@ function createMiddleware(opts = {}) {
       if (ecdhKeyPair) {
         sessionStore.set(ecdhKeyPair.id, {
           keyPair: ecdhKeyPair,
+          expectedVmState,
+          headerProfile: extractHeaderProfile(req),
           pow: { challenge, difficulty, issuedAt },
         });
       }
@@ -188,7 +191,7 @@ function createDecryptHandler(sessionStore, onTelemetry) {
       }
 
       const keyPair = session.keyPair || session;
-      const plaintext = decryptTelemetry(body, keyPair.privateKey);
+      const plaintext = decryptTelemetry(body, keyPair.privateKey, session.expectedVmState);
 
       // Cryptographically verify PoW challenge server-side
       const clientPoW = plaintext.pow || {};
@@ -216,7 +219,8 @@ function createDecryptHandler(sessionStore, onTelemetry) {
         reason: powVerification.reason,
       };
 
-      return onTelemetry(plaintext, req, res);
+      return onTelemetry(plaintext, req, res,
+        verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext));
     } catch (err) {
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });

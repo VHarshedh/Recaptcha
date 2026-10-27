@@ -102,4 +102,14 @@ function expandIPv6(addr) {
   return expanded.join(":");
 }
 
-module.exports = { maskIP };
+// TRUST_PROXY=1 is safe only when ingress is restricted to a proxy that
+// appends the actual peer address. Never enable it on a public origin.
+function getClientIP(req) {
+  const forwarded = req.headers?.["x-forwarded-for"];
+  if (process.env.TRUST_PROXY === "1" && typeof forwarded === "string") {
+    const last = forwarded.split(",").pop().trim();
+    if (require("node:net").isIP(last)) return last;
+  }
+  return req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown";
+}
+module.exports = { maskIP, getClientIP };

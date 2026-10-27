@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+node_modules
+tmp
+temp

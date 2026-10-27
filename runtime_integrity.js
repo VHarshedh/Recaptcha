@@ -40,6 +40,7 @@
   function collect(options) {
     options = options || {};
     const anomalies = [];
+    let receiverErrorText = "";
     const scores = Object.create(null);
     function note(group, weight, message) {
       if (!anomalies.includes(message)) anomalies.push(message);
@@ -151,6 +152,7 @@
           note('receiver', 0.65, 'Navigator.languages: incompatible receiver did not throw TypeError');
         } else {
           const text = String(result.error);
+          receiverErrorText = text;
           if (typeof options.expectedLanguagesError === 'string') {
             if (text !== options.expectedLanguagesError)
               note('receiver', 0.65, 'Navigator.languages: error differs from supplied exact baseline: ' + text);
@@ -273,6 +275,7 @@
     });
     const penalty = Math.min(1, Object.keys(scores).reduce((sum, key) => sum + scores[key], 0));
     return {
+      receiverErrorText: receiverErrorText,
       tampering_detected: penalty >= 0.5,
       anomalies,
       confidence_penalty: Math.round(penalty * 1000) / 1000

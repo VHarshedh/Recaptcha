@@ -1,78 +1,31 @@
-/**
- * keys.js — Persistent Ed25519 Key-Pair Manager
- *
- * Loads an existing Ed25519 key pair from disk on startup, or generates
- * a new one and persists it.  This ensures that the compiler middleware
- * and the attestation server share the same signing identity across
- * process restarts and separate Node processes.
- *
- * Configuration:
- *   ATTESTATION_KEY_PATH  env var — file path (default: ./attestation_ed25519.key)
- *
- * Exports:
- *   privateKey   – crypto.KeyObject (Ed25519 private)
- *   publicKey    – crypto.KeyObject (Ed25519 public)
- *   publicKeyPem – PEM-encoded public key string (for distribution)
- *   publicKeyDer – raw DER-encoded public key Buffer
+/** Ed25519 signing identity. ATTESTATION_KEY_PATH must point to an externally
+ * provisioned JSON key file in production. Invalid configured keys fail closed.
+ * Development without configuration uses an ephemeral process-local identity.
  */
 
 "use strict";
 
 const crypto = require("node:crypto");
 const fs     = require("node:fs");
-const path   = require("node:path");
 
-const KEY_PATH = process.env.ATTESTATION_KEY_PATH ||
-  path.join(__dirname, "..", "attestation_ed25519.key");
-
+// Deployment keys must be injected explicitly, outside source/build artifacts.
+// Development defaults are ephemeral and never write a private key into the repo.
+const KEY_PATH = process.env.ATTESTATION_KEY_PATH;
 let privateKey, publicKey;
-
-try {
-  if (fs.existsSync(KEY_PATH)) {
-    // ── Load existing key pair from disk ─────────────────────────────
-    const stored = JSON.parse(fs.readFileSync(KEY_PATH, "utf-8"));
-    privateKey = crypto.createPrivateKey({
-      key: Buffer.from(stored.privateKeyDer, "base64"),
-      format: "der",
-      type: "pkcs8",
-    });
-    publicKey = crypto.createPublicKey(privateKey);
-    console.log(`[keys] loaded Ed25519 key pair from ${KEY_PATH}`);
-  }
-} catch (err) {
-  console.warn(`[keys] failed to load key from ${KEY_PATH}: ${err.message}`);
-  privateKey = null;
-}
-
-if (!privateKey) {
-  // ── Generate new key pair and persist to disk ─────────────────────
-  const pair = crypto.generateKeyPairSync("ed25519");
-  privateKey = pair.privateKey;
-  publicKey  = pair.publicKey;
-
-  const keyData = {
-    algorithm: "ed25519",
-    privateKeyDer: privateKey
-      .export({ type: "pkcs8", format: "der" })
-      .toString("base64"),
-    createdAt: new Date().toISOString(),
-  };
-
-  try {
-    const dir = path.dirname(KEY_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(KEY_PATH, JSON.stringify(keyData, null, 2), {
-      mode: 0o600,
-    });
-    console.log(`[keys] generated and saved new Ed25519 key pair → ${KEY_PATH}`);
-  } catch (writeErr) {
-    console.warn(
-      `[keys] could not persist key to ${KEY_PATH}: ${writeErr.message}. ` +
-      `Key exists only in memory for this process.`
-    );
-  }
+if (KEY_PATH) {
+  const stored = JSON.parse(fs.readFileSync(KEY_PATH, "utf-8"));
+  privateKey = crypto.createPrivateKey({
+    key: Buffer.from(stored.privateKeyDer, "base64"), format: "der", type: "pkcs8",
+  });
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Ed25519 key required");
+  // Reject the disclosed key by public fingerprint, without embedding its secret.
+  const fingerprint = crypto.createHash("sha256")
+    .update(crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" })).digest("hex");
+  if (["3aac5fa35b993f6b6cf028f051d83d52f4f6c287780eebdf55373f14184ce820"].includes(fingerprint)) throw new Error("Disclosed signing key revoked; provision a new key");
+  publicKey = crypto.createPublicKey(privateKey);
+} else {
+  if (process.env.NODE_ENV === "production") throw new Error("ATTESTATION_KEY_PATH is required in production");
+  ({ privateKey, publicKey } = crypto.generateKeyPairSync("ed25519"));
 }
 
 const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });

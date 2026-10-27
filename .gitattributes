@@ -1,0 +1,5 @@
+*.key export-ignore
+*.pem export-ignore
+*.pfx export-ignore
+*.p12 export-ignore
+.env* export-ignore

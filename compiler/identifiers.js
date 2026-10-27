@@ -106,6 +106,16 @@ function extractIdentifiers(source) {
     }
   }
 
+  // This is a conservative lexical renamer, not a scope-aware AST transform.
+  // Keep names used as properties (including shorthand exports) stable so
+  // collector APIs and telemetry field names survive compilation.
+  for (const pattern of [
+    /\.\s*([a-zA-Z_$][a-zA-Z0-9_$]*)/g,
+    /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:/g,
+    /[,{]\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?=[,}])/g,
+  ]) {
+    for (const match of source.matchAll(pattern)) ids.delete(match[1]);
+  }
   return Array.from(ids);
 }
 
@@ -172,7 +182,7 @@ function applyMapping(source, mapping) {
   names.sort((a, b) => b.length - a.length);
 
   const escaped = names.map((n) => n.replace(/[$]/g, "\\$&"));
-  const pattern = new RegExp(`\\b(${escaped.join("|")})\\b`, "g");
+  const pattern = new RegExp(`(?<![a-zA-Z0-9_$])(${escaped.join("|")})(?![a-zA-Z0-9_$])`, "g");
 
   return source.replace(pattern, (match) => mapping[match] || match);
 }

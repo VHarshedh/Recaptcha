@@ -158,9 +158,7 @@ function scoreKinematics(kin) {
   let score = 0.25; // baseline: "script loaded and captured something"
 
   const counts = kin.eventCounts || {};
-  const totalEvents =
-    (counts.mousemove || 0) + (counts.touchstart || 0) +
-    (counts.touchmove || 0) + (counts.keydown || 0);
+  const totalEvents = countInteractions(counts);
 
   // ── Untrusted event rejection ─────────────────────────────────────
   // dispatchEvent() / new MouseEvent() have isTrusted=false.
@@ -296,7 +294,7 @@ function scorePoW(pow) {
  * @param {Object} payload — decrypted and server-enriched telemetry
  * @returns {{ score: number, breakdown: Object, clamped: boolean, clampReason?: string }}
  */
-function computeScore(payload) {
+function computeScore(payload, headerCheck) {
   if (!payload || typeof payload !== "object") {
     return { score: 0.0, breakdown: {}, clamped: true, clampReason: "missing payload" };
   }
@@ -343,6 +341,21 @@ function computeScore(payload) {
     clampReason = "PoW server verification failed";
   }
 
+  if (countInteractions(payload.kinematics?.eventCounts) === 0 && score > 0.45) {
+    score = 0.45;
+    clamped = true;
+    clampReason = "no trusted interaction events reported";
+  }
+  // Only accept this result via the server-owned argument, never payload fields.
+  if (headerCheck) {
+    breakdown.headers = headerCheck;
+    score *= 1 - clamp01(headerCheck.penalty);
+    if (headerCheck.penalty >= 0.5) {
+      score = Math.min(score, 0.1);
+      clamped = true;
+      clampReason = "HTTP/browser consistency failure";
+    }
+  }
   score = round4(clamp01(score));
 
   const result = { score, breakdown, clamped };
@@ -354,7 +367,13 @@ function computeScore(payload) {
 /*  Utilities                                                          */
 /* ------------------------------------------------------------------ */
 
+function countInteractions(counts = {}) {
+  return ["mousemove", "touchstart", "touchmove", "touchend", "keydown", "keyup"]
+    .reduce((sum, key) => sum + (Number.isSafeInteger(counts?.[key]) && counts[key] > 0 ? counts[key] : 0), 0);
+}
+
 function clamp01(v) {
+  if (!Number.isFinite(v)) return 0;
   return Math.max(0, Math.min(1, v));
 }
 

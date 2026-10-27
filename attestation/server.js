@@ -18,7 +18,7 @@ const http = require("node:http");
 const { computeScore } = require("./scorer");
 const { issueToken } = require("./token");
 const { verifyToken } = require("./verifier");
-const { maskIP } = require("./ip_mask");
+const { maskIP, getClientIP } = require("./ip_mask");
 const { publicKeyPem } = require("./keys");
 const { createMiddleware, createDecryptHandler, SessionStore } = require("../compiler/middleware");
 
@@ -30,18 +30,6 @@ const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessio
 /* ------------------------------------------------------------------ */
 /*  Safe IP extraction (Vuln 5 fix)                                    */
 /* ------------------------------------------------------------------ */
-
-function getClientIP(req) {
-  // Only trust X-Forwarded-For if explicitly configured via TRUST_PROXY=1.
-  // When enabled, only the rightmost entry (appended by the trusted proxy) is used.
-  if (process.env.TRUST_PROXY === "1" && req.headers["x-forwarded-for"]) {
-    const parts = req.headers["x-forwarded-for"].split(",").map(s => s.trim()).filter(Boolean);
-    if (parts.length > 0) {
-      return parts[parts.length - 1];
-    }
-  }
-  return req.socket?.remoteAddress || "unknown";
-}
 
 /* ------------------------------------------------------------------ */
 /*  Request body parser (JSON, capped at 64 KB)                        */
@@ -70,7 +58,7 @@ function readBody(req, maxBytes = 65_536) {
 /* ------------------------------------------------------------------ */
 
 // POST /attest handler — mandatory ECDH decryption + server-verified PoW
-const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res) => {
+const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res, headerCheck) => {
   const action = typeof telemetry.action === "string" && telemetry.action.length > 0
     ? telemetry.action
     : "unknown";
@@ -78,7 +66,7 @@ const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res) =>
   const clientIP = getClientIP(req);
   const ipSubnet = maskIP(clientIP);
 
-  const { score, breakdown, clamped, clampReason } = computeScore(telemetry);
+  const { score, breakdown, clamped, clampReason } = computeScore(telemetry, headerCheck);
   const { token, claims } = issueToken({ score, action, ipSubnet });
 
   return json(res, 200, {
@@ -95,8 +83,8 @@ function handleVerify(req, res) {
   // Quick inline verification endpoint for integration tests.
   return readBody(req)
     .then((raw) => {
-      const { token, clientIP, action, minScore } = JSON.parse(raw.toString("utf-8"));
-      const result = verifyToken(token, { clientIP, action, minScore });
+      const { token, action, minScore } = JSON.parse(raw.toString("utf-8"));
+      const result = verifyToken(token, { clientIP: getClientIP(req), action, minScore });
       return json(res, result.valid ? 200 : 403, result);
     })
     .catch((err) => json(res, 400, { error: err.message }));

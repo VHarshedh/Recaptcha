@@ -41,12 +41,10 @@ const SOURCE_LIST = [
 
 /** Strip "use strict" directives, comments, and transform UMD wrappers. */
 function preprocess(src) {
-  // Remove single-line comments (not inside strings — good enough for our controlled sources).
-  let out = src.replace(/^\s*\/\/.*$/gm, "");
-  // Remove multi-line block comments.
-  out = out.replace(/\/\*[\s\S]*?\*\//g, "");
-  // Remove "use strict" directives.
-  out = out.replace(/["']use strict["'];?\s*/g, "");
+  // Protect literals while removing comments; preserve source-text canaries.
+  let out = src.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\/\*[\s\S]*?\*\/|^\s*\/\/[^\r\n]*)/gm,
+    (match, literal) => literal || (match.includes("runtime_integrity_source_canary") ? match : " "));
+  out = out.replace(/^\s*["']use strict["'];?\s*$/gm, "");
 
   // Transform UMD wrapper to direct IIFE assignment to globalThis and local var
   const umdRegex = /\(function\s*\(\s*root\s*,\s*factory\s*\)\s*\{[\s\S]*?Object\.defineProperty\(\s*root\s*,\s*['"](\w+)['"][\s\S]*?\}\)\s*\([^,]+,\s*function\s*\(\s*root\s*\)\s*\{([\s\S]*?)\}\);\s*$/;
@@ -95,7 +93,7 @@ function createNameGenerator() {
  * @param {number} powDifficulty
  * @returns {string}
  */
-function generateFlattenedMain(names, endpoint, powChallenge, powDifficulty) {
+function generateFlattenedMain(names, endpoint, powChallenge, powDifficulty, vmSeed, stepConsts) {
   // Generate random case labels and a random dispatch order.
   const caseValues = [];
   for (let i = 0; i < 8; i++) caseValues.push(crypto.randomInt(10, 9999));
@@ -119,26 +117,31 @@ var ${names.powPromise} = solvePoW({
 
 async function ${names.mainFn}(${names.actionParam}) {
   var ${names.collector} = {};
+  var ${names.vmState} = ${vmSeed};
   var ${names.state} = ${cv[0]};
   var ${names.retVal} = null;
   while (${names.state} !== ${SENTINEL}) {
     switch (${names.state}) {
       case ${cv[0]}:
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[0]}, 73244475) | 0;
         var ${names.rtRef} = (typeof globalThis !== "undefined" && globalThis["RuntimeIntegrity"]) || (typeof window !== "undefined" && window["RuntimeIntegrity"]) || (typeof RuntimeIntegrity !== "undefined" ? RuntimeIntegrity : null);
         ${names.collector}["runtime"] = (${names.rtRef} && typeof ${names.rtRef}["collect"] === "function") ? ${names.rtRef}["collect"]() : {};
         ${names.state} = ${cv[1]};
         break;
       case ${cv[1]}:
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[1]}, 73244475) | 0;
         var ${names.hwRef} = (typeof globalThis !== "undefined" && globalThis["HardwareConsistency"]) || (typeof window !== "undefined" && window["HardwareConsistency"]) || (typeof HardwareConsistency !== "undefined" ? HardwareConsistency : null);
         ${names.collector}["hardware"] = (${names.hwRef} && typeof ${names.hwRef}["collect"] === "function") ? await ${names.hwRef}["collect"]() : {};
         ${names.state} = ${cv[2]};
         break;
       case ${cv[2]}:
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[2]}, 73244475) | 0;
         var ${names.kinSnap} = (typeof globalThis !== "undefined" && globalThis["Kinematics"]) || (typeof window !== "undefined" && window["Kinematics"]) || (typeof Kinematics !== "undefined" ? Kinematics : null);
         ${names.collector}["kinematics"] = (${names.kinSnap} && typeof ${names.kinSnap}["getBiometricVector"] === "function") ? ${names.kinSnap}["getBiometricVector"]() : {};
         ${names.state} = ${cv[3]};
         break;
       case ${cv[3]}:
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[3]}, 73244475) | 0;
         ${names.collector}["action"] = (typeof ${names.actionParam} === "string" && ${names.actionParam}["length"] > 0)
           ? ${names.actionParam}
           : ((typeof document !== "undefined" && document["body"])
@@ -147,6 +150,7 @@ async function ${names.mainFn}(${names.actionParam}) {
         ${names.state} = ${cv[4]};
         break;
       case ${cv[4]}:
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[4]}, 73244475) | 0;
         try {
           var ${names.powRes} = await ${names.powPromise};
           ${names.collector}["pow"] = {
@@ -164,7 +168,8 @@ async function ${names.mainFn}(${names.actionParam}) {
         ${names.state} = ${cv[5]};
         break;
       case ${cv[5]}:
-        ${names.retVal} = await ${names.ecdhFn}(${names.collector}, "${endpoint}");
+        ${names.vmState} = Math["imul"](${names.vmState} ^ ${stepConsts[5]}, 73244475) | 0;
+        ${names.retVal} = await ${names.ecdhFn}(${names.collector}, "${endpoint}", ${names.vmState});
         ${names.state} = ${SENTINEL};
         break;
       default:
@@ -256,7 +261,11 @@ function compile(options = {}) {
   }
 
   // ── 3. Generate flattened main collector ───────────────────────────
+  const vmSeed = crypto.randomBytes(4).readInt32BE();
+  const stepConsts = Array.from({ length: 6 }, () => crypto.randomBytes(4).readInt32BE());
+  const expectedVmState = stepConsts.reduce((state, step) => Math.imul(state ^ step, 73244475) | 0, vmSeed);
   const mainNames = {
+    vmState: nameGen(),
     kinRef:       nameGen(),
     powPromise:   nameGen(),
     mainFn:       nameGen(),
@@ -271,7 +280,7 @@ function compile(options = {}) {
     hook:         nameGen(),
     ecdhFn:       ecdhFnName,
   };
-  rawSource += "\n\n" + generateFlattenedMain(mainNames, attestEndpoint, activeChallenge, activeDifficulty);
+  rawSource += "\n\n" + generateFlattenedMain(mainNames, attestEndpoint, activeChallenge, activeDifficulty, vmSeed, stepConsts);
 
   // ── 4. String extraction & encryption ─────────────────────────────
   const strings      = extractStrings(rawSource);
@@ -298,6 +307,7 @@ function compile(options = {}) {
   return {
     bundle,
     buildId,
+    expectedVmState,
     ecdhKeyPair,
     pow: {
       challenge: activeChallenge,
