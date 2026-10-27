@@ -57,7 +57,7 @@ class SessionStore {
     const entry = this._map.get(sessionId);
     if (!entry) return null;
     this._map.delete(sessionId);
-    if (Date.now() - entry.createdAt > this._ttlMs) return null;
+    if (Date.now() - entry.createdAt >= this._ttlMs) return null;
     if (entry.keyPair) {
       return Object.assign(Object.create(entry.keyPair), entry);
     }
@@ -220,7 +220,8 @@ function createDecryptHandler(sessionStore, onTelemetry) {
       };
 
       return onTelemetry(plaintext, req, res,
-        verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext));
+        verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext),
+        { ...session, sessionId: body.sid, clientPublicKey: body.cpk });
     } catch (err) {
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });

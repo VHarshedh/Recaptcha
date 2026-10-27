@@ -85,7 +85,7 @@ function expandIPv6(addr) {
     const left = parts[0] ? parts[0].split(":") : [];
     const right = parts[1] ? parts[1].split(":") : [];
     const fill = 8 - left.length - right.length;
-    if (fill < 0) return null;
+    if (fill <= 0) return null;
     halves = [...left, ...Array(fill).fill("0000"), ...right];
   } else {
     halves = addr.split(":");
@@ -108,7 +108,9 @@ function getClientIP(req) {
   const forwarded = req.headers?.["x-forwarded-for"];
   if (process.env.TRUST_PROXY === "1" && typeof forwarded === "string") {
     const last = forwarded.split(",").pop().trim();
-    if (require("node:net").isIP(last)) return last;
+    const v4 = /^(?:::ffff:)?\d{1,3}(?:\.\d{1,3}){3}$/i.test(last);
+    const v6 = /^[0-9a-f:]+$/i.test(last) && expandIPv6(last);
+    if ((v4 || v6) && maskIP(last) !== "unknown") return last;
   }
   return req.socket?.remoteAddress || req.connection?.remoteAddress || "unknown";
 }

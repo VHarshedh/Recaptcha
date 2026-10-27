@@ -28,8 +28,8 @@ function verifyHeaderConsistency(initial, current, telemetry) {
   if (!current.ua || telemetry?.hardware?.profile?.userAgent !== current.ua)
     note("http_ua_vs_js_ua_mismatch", 0.9);
 
-  // These may be omitted by policy, intermediaries, or on untrustworthy origins.
-  // Absence alone must not hard-reject a legitimate browser.
+  // Fetch metadata absence is weak evidence. Chrome hint/engine mismatches below
+  // deliberately trigger step-up under this deployment's stricter policy.
   if (!current.secFetchSite || !current.secFetchMode) note("missing_sec_fetch_headers", 0.05);
   if (!current.acceptLanguage) note("missing_accept_language", 0.05);
   const chromium = /Chrome\/\d+/.test(current.ua);
@@ -39,12 +39,12 @@ function verifyHeaderConsistency(initial, current, telemetry) {
   if (!error) note("missing_receiver_error", 0.1);
   if (chromium) {
     if (!current.secChUa || !current.secChUaPlatform || !current.secChUaMobile)
-      note("chrome_ua_missing_client_hints", 0.05);
-    if (/does not implement interface|incompatible receiver/i.test(error))
+      note("chrome_ua_missing_client_hints", 0.6);
+    if (error !== "TypeError: Illegal invocation")
       note("chrome_ua_non_v8_receiver_error", 0.8);
   }
   if (firefox) {
-    if (/"(?:Chromium|Google Chrome|Microsoft Edge)"/i.test(current.secChUa))
+    if (current.secChUa || current.secChUaPlatform || current.secChUaMobile)
       note("firefox_ua_sent_chrome_client_hints", 0.8);
     if (/Illegal invocation/.test(error)) note("firefox_ua_with_v8_engine_error", 0.8);
   }

@@ -368,7 +368,7 @@ function computeScore(payload, headerCheck) {
 /* ------------------------------------------------------------------ */
 
 function countInteractions(counts = {}) {
-  return ["mousemove", "touchstart", "touchmove", "touchend", "keydown", "keyup"]
+  return ["mousemove", "touchstart", "touchmove", "keydown"]
     .reduce((sum, key) => sum + (Number.isSafeInteger(counts?.[key]) && counts[key] > 0 ? counts[key] : 0), 0);
 }
 

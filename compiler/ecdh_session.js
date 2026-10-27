@@ -71,6 +71,7 @@ function generateClientECDHCode(serverPubKeyBase64, sessionId, fnName) {
   // can still replace these; this is not a browser-authentication boundary.
   return `
 var _subtle = crypto["subtle"];
+var _clientKeyPromise;
 var _jsonStringify = JSON["stringify"];
 var _TextEncoder = TextEncoder;
 var _getRandomValues = crypto["getRandomValues"]["bind"](crypto);
@@ -106,11 +107,11 @@ async function ${name}(payloadObj, endpointUrl, vmState) {
     []
   );
 
-  var clientKP = await _subtle["generateKey"](
+  var clientKP = await (_clientKeyPromise || (_clientKeyPromise = _subtle["generateKey"](
     { "name": "ECDH", "namedCurve": "P-256" },
     true,
     ["deriveBits"]
-  );
+  )));
 
   var sharedBits = await _subtle["deriveBits"](
     { "name": "ECDH", "public": serverPub },
@@ -127,7 +128,7 @@ async function ${name}(payloadObj, endpointUrl, vmState) {
     derivedBits,
     { "name": "AES-GCM" },
     false,
-    ["encrypt"]
+    ["encrypt", "decrypt"]
   );
 
   var ivBytes = _getRandomValues(new Uint8Array(12));
@@ -156,11 +157,26 @@ async function ${name}(payloadObj, endpointUrl, vmState) {
   wireMsg["ct"]  = toB64(cipherBuf);
   wireMsg["sid"] = sessionId;
 
-  return fetch(endpointUrl, {
+  var response = await fetch(endpointUrl, {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
     "body": _jsonStringify(wireMsg)
   });
+  var responseData = await response["json"]();
+  if (!response["ok"]) throw new Error(responseData["error"] || "Attestation failed");
+  if (responseData["rendering"]) {
+    function fromB64(value) {
+      var binary = atob(value);
+      var outBytes = new Uint8Array(binary["length"]);
+      for (var di = 0; di < binary["length"]; di++) outBytes[di] = binary["charCodeAt"](di);
+      return outBytes;
+    }
+    var renderPlain = await _subtle["decrypt"](
+      { "name": "AES-GCM", "iv": fromB64(responseData["rendering"]["iv"]) }, aesKey,
+      fromB64(responseData["rendering"]["ct"]));
+    responseData["rendering"] = JSON["parse"](new TextDecoder()["decode"](renderPlain));
+  }
+  return responseData;
 }
 `;
 }

@@ -73,13 +73,13 @@ async function main() {
     const build = compile({ sourceFiles: ["runtime_integrity.js", "hardware_consistency.js", "kinematics.js"], powDifficulty: 1 });
     let wire;
     const subtle = {};
-    for (const name of ["encrypt", "importKey", "generateKey", "deriveBits", "exportKey", "digest"])
+    for (const name of ["encrypt", "decrypt", "importKey", "generateKey", "deriveBits", "exportKey", "digest"])
       subtle[name] = crypto.webcrypto.subtle[name].bind(crypto.webcrypto.subtle);
     const context = vm.createContext({ crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
       TextEncoder, atob, btoa, performance, setTimeout, clearTimeout,
       addEventListener() {}, removeEventListener() {},
       solvePoW: async () => ({ nonce: 0, durationMs: 1 }),
-      fetch: async (_url, opts) => { wire = JSON.parse(opts.body); return { ok: true }; } });
+      fetch: async (_url, opts) => { wire = JSON.parse(opts.body); return { ok: true, json: async () => ({ status: "passed", token: "test-token" }) }; } });
     vm.runInContext(build.bundle, context);
     assert.equal(typeof context.RuntimeIntegrity.collect, "function");
     await context.__attestation.execute("login");

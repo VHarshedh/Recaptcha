@@ -1,0 +1,97 @@
+/* Browser-only orchestration, compiled into every collector. */
+async function completeAttestation(result, sendStep) {
+  if (result["status"] === "passed" && typeof result["token"] === "string") return result["token"];
+  if (result["status"] !== "step_up_pow" && result["status"] !== "step_up_visual") throw new Error("Invalid attestation response");
+  var remainingMs = result["expiresAt"] - Date.now();
+  if (remainingMs <= 0) throw new Error("Challenge expired. Please try again.");
+  var controller = new AbortController();
+  var modal = null;
+  try {
+    if (result["status"] === "step_up_visual") modal = openVisualChallenge(result["rendering"], remainingMs);
+    var work = solvePoW({ "challenge": result["pow"]["challenge"], "difficulty": result["pow"]["difficulty"],
+      "timeoutMs": remainingMs, "signal": controller["signal"] });
+    var values = await Promise.all([work, modal ? modal["answer"] : Promise.resolve("")]);
+    var verified = await sendStep({ "sessionId": result["sessionId"], "challengeId": result["challengeId"],
+      "challengeToken": result["challengeToken"], "answer": values[1], "powSolution": values[0] });
+    if (verified["status"] !== "passed" || typeof verified["token"] !== "string") throw new Error("Challenge verification failed");
+    return verified["token"];
+  } finally {
+    controller["abort"]();
+    if (modal) modal["destroy"]();
+  }
+}
+
+function openVisualChallenge(instructions, ttl) {
+  var previousFocus = document["activeElement"];
+  var host = document["createElement"]("div");
+  var shadow = host["attachShadow"]({ "mode": "closed" });
+  var style = document["createElement"]("style");
+  style["textContent"] = ":host{all:initial;position:fixed;inset:0;z-index:2147483647;font:15px system-ui;color:#e2e8f0}*{box-sizing:border-box}.backdrop{height:100%;display:grid;place-items:center;background:#020617b8;padding:20px}.card{width:min(390px,100%);padding:28px;background:#0f172a;border:1px solid #334155;border-radius:20px;box-shadow:0 24px 80px #0008}h2{font-size:22px;margin:0 0 10px}p{color:#94a3b8;line-height:1.5}canvas{width:100%;height:auto;border-radius:10px;margin:12px 0}label{display:block;margin:12px 0 8px}input{width:100%;padding:12px;background:#1e293b;color:white;border:1px solid #64748b;border-radius:8px;font:22px monospace;letter-spacing:5px}button{padding:12px;border:0;border-radius:8px;cursor:pointer;font:inherit}.actions{display:flex;gap:10px;margin-top:20px}.submit{flex:1;background:#38bdf8;color:#082f49}.cancel{background:#334155;color:white}:focus-visible{outline:3px solid #7dd3fc;outline-offset:3px}";
+  shadow["appendChild"](style);
+  var backdrop = document["createElement"]("div"); backdrop["className"] = "backdrop";
+  var form = document["createElement"]("form"); form["className"] = "card";
+  form["setAttribute"]("role", "dialog"); form["setAttribute"]("aria-modal", "true"); form["setAttribute"]("aria-label", "Security check");
+  var heading = document["createElement"]("h2"); heading["textContent"] = "One quick security check";
+  var help = document["createElement"]("p"); help["textContent"] = "Enter the six characters below. Uppercase and lowercase both work. This check expires in 60 seconds.";
+  var canvas = document["createElement"]("canvas"); canvas["width"] = instructions["width"]; canvas["height"] = instructions["height"];
+  canvas["setAttribute"]("aria-label", "Six distorted characters to transcribe");
+  var label = document["createElement"]("label"); label["textContent"] = "Characters"; label["htmlFor"] = "challenge-answer";
+  var input = document["createElement"]("input"); input["id"] = "challenge-answer"; input["maxLength"] = 6;
+  input["required"] = true; input["pattern"] = "[A-Za-z2-9]{6}"; input["autocomplete"] = "off";
+  var actions = document["createElement"]("div"); actions["className"] = "actions";
+  var cancel = document["createElement"]("button"); cancel["type"] = "button"; cancel["className"] = "cancel"; cancel["textContent"] = "Cancel";
+  var submit = document["createElement"]("button"); submit["type"] = "submit"; submit["className"] = "submit"; submit["textContent"] = "Verify";
+  actions["append"](cancel, submit); form["append"](heading, help, canvas, label, input, actions);
+  backdrop["appendChild"](form); shadow["appendChild"](backdrop); document["body"]["appendChild"](host);
+  var frameTimer, expiryTimer, rejectAnswer, finished = false;
+  var ctx, shapes;
+  try {
+    ctx = canvas["getContext"]("2d");
+    if (!ctx) throw new Error("Canvas unavailable");
+    shapes = instructions["paths"]["map"](function(shape) { return { "path": new Path2D(shape["d"]), "style": shape }; });
+  } catch (error) { destroy(); throw error; }
+  var seed = instructions["noise"]["seed"];
+  function randomNoise() { seed = (Math.imul(seed, 1664525) + 1013904223) | 0; return (seed >>> 0) / 4294967296; }
+  function paint() {
+    ctx["globalAlpha"] = 1; ctx["fillStyle"] = instructions["background"]; ctx["fillRect"](0, 0, canvas["width"], canvas["height"]);
+    shapes["forEach"](function(shape) {
+      ctx["fillStyle"] = ctx["strokeStyle"] = shape["style"]["color"]; ctx["lineWidth"] = shape["style"]["width"];
+      if (shape["style"]["fill"]) ctx["fill"](shape["path"]);
+      ctx["stroke"](shape["path"]);
+    });
+    ctx["globalAlpha"] = instructions["noise"]["opacity"];
+    for (var particle = 0; particle < instructions["noise"]["particles"]; particle++) {
+      ctx["fillStyle"] = instructions["palette"][Math.floor(randomNoise() * instructions["palette"]["length"])];
+      ctx["fillRect"](randomNoise() * canvas["width"], randomNoise() * canvas["height"], 1 + randomNoise() * 3, 1 + randomNoise() * 3);
+    }
+  }
+  function destroy() {
+    clearInterval(frameTimer); clearTimeout(expiryTimer); host["remove"]();
+    if (!finished && rejectAnswer) { finished = true; rejectAnswer(new Error("Challenge closed")); }
+    if (previousFocus && previousFocus["focus"]) previousFocus["focus"]();
+  }
+  var answer = new Promise(function(resolve, reject) {
+    rejectAnswer = reject;
+    function fail(message) { if (!finished) { finished = true; reject(new Error(message)); } }
+    cancel["addEventListener"]("click", function() { fail("Challenge cancelled"); });
+    form["addEventListener"]("keydown", function(event) {
+      if (event["key"] === "Escape") { event["preventDefault"](); fail("Challenge cancelled"); }
+      if (event["key"] === "Tab") {
+        var first = input, last = submit;
+        if (event["shiftKey"] && shadow["activeElement"] === first) { event["preventDefault"](); last["focus"](); }
+        else if (!event["shiftKey"] && shadow["activeElement"] === last) { event["preventDefault"](); first["focus"](); }
+      }
+    });
+    form["addEventListener"]("submit", function(event) {
+      event["preventDefault"]();
+      if (!finished && form["checkValidity"]()) { finished = true; submit["disabled"] = true; submit["textContent"] = "Checking..."; resolve(input["value"]); }
+    });
+    expiryTimer = setTimeout(function() { fail("Challenge expired. Please try again."); }, ttl);
+  });
+  try {
+    paint();
+    if (!(window["matchMedia"] && window["matchMedia"]("(prefers-reduced-motion: reduce)")["matches"])) frameTimer = setInterval(paint, 1000 / 30);
+    input["focus"]();
+  } catch (error) { answer["catch"](function() {}); destroy(); throw error; }
+  return { "answer": answer, "destroy": destroy };
+}

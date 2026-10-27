@@ -177,7 +177,9 @@ async function ${names.mainFn}(${names.actionParam}) {
         break;
     }
   }
-  return ${names.retVal};
+  return completeAttestation(${names.retVal}, function(stepPayload) {
+    return ${names.ecdhFn}(stepPayload, "${endpoint}/verify-challenge", ${names.vmState});
+  });
 }
 
 var ${names.hook} = {};
@@ -246,6 +248,8 @@ function compile(options = {}) {
     }
     rawSource = modules.join("\n\n");
   }
+
+  rawSource += "\n" + preprocess(fs.readFileSync(path.join(__dirname, "step_up.js"), "utf-8"));
 
   // ── 2. Generate ECDH client code ──────────────────────────────────
   let ecdhKeyPair = null;

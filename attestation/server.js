@@ -15,8 +15,7 @@
 "use strict";
 
 const http = require("node:http");
-const { computeScore } = require("./scorer");
-const { issueToken } = require("./token");
+const { AdaptiveChallenge } = require("./adaptive_challenge");
 const { verifyToken } = require("./verifier");
 const { maskIP, getClientIP } = require("./ip_mask");
 const { publicKeyPem } = require("./keys");
@@ -24,7 +23,7 @@ const { createMiddleware, createDecryptHandler, SessionStore } = require("../com
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
 
-const sessionStore = new SessionStore();
+function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)) } = {}) {
 const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessionStore });
 
 /* ------------------------------------------------------------------ */
@@ -58,26 +57,18 @@ function readBody(req, maxBytes = 65_536) {
 /* ------------------------------------------------------------------ */
 
 // POST /attest handler — mandatory ECDH decryption + server-verified PoW
-const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res, headerCheck) => {
-  const action = typeof telemetry.action === "string" && telemetry.action.length > 0
-    ? telemetry.action
-    : "unknown";
-
-  const clientIP = getClientIP(req);
-  const ipSubnet = maskIP(clientIP);
-
-  const { score, breakdown, clamped, clampReason } = computeScore(telemetry, headerCheck);
-  const { token, claims } = issueToken({ score, action, ipSubnet });
-
-  return json(res, 200, {
-    score,
-    breakdown,
-    clamped,
-    clampReason,
-    token,
-    claims,
-  });
+const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res, headerCheck, session) => {
+  return json(res, 200, adaptive.assess(telemetry, req, headerCheck, session));
 });
+
+async function handleChallenge(req, res) {
+  try {
+    const body = JSON.parse((await readBody(req)).toString("utf8"));
+    return json(res, 200, adaptive.verify(body, req));
+  } catch (_) {
+    return json(res, 403, { status: "failed", error: "Challenge failed or expired. Start again." });
+  }
+}
 
 function handleVerify(req, res) {
   // Quick inline verification endpoint for integration tests.
@@ -121,6 +112,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (url === "/collector.js" && req.method === "GET") return collectorMiddleware(req, res);
+    if (url === "/attest/verify-challenge" && req.method === "POST") return handleChallenge(req, res);
     if (url === "/attest" && req.method === "POST") return handleAttest(req, res);
     if (url === "/verify" && req.method === "POST") return handleVerify(req, res);
     if (url === "/pubkey" && req.method === "GET")  return handlePubkey(req, res);
@@ -133,10 +125,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[attestation] listening on :${PORT}`);
-  console.log(`[attestation] endpoints: POST /attest, POST /verify, GET /pubkey, GET /health`);
-});
+return server;
+}
+if (require.main === module) {
+  createServer().listen(PORT, () => console.log(`[attestation] listening on :${PORT}`));
+}
+module.exports = { createServer };
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -145,6 +139,7 @@ server.listen(PORT, () => {
 function json(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
+    "Cache-Control": "no-store",
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(payload),
   });
