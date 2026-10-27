@@ -68,55 +68,55 @@ console.log("\n══ scorer.js ══");
 
 const { computeScore, _scoreRuntime, _scoreHardware, _scoreKinematics, _scorePoW } = require("./scorer");
 
-// Sub-scorers
-assert(_scoreRuntime({ tampered: true }) === 0, "tampered runtime → 0");
-assert(_scoreRuntime({ tampered: false }) === 1.0, "clean runtime → 1.0");
-assert(_scoreRuntime({ tampered: false, signals: { devtools: true } }) < 1.0, "devtools penalty");
+// Sub-scorers (raw telemetry)
+assert(_scoreRuntime({ confidence_penalty: 0.8 }) <= 0.15, "tampered runtime (penalty 0.8) → low");
+assert(_scoreRuntime({ confidence_penalty: 0 }) === 1.0, "clean runtime (penalty 0) → 1.0");
+assert(_scoreRuntime({ confidence_penalty: 0.2, anomalies: ["1","2","3","4","5","6"] }) < 0.85, "anomalies penalty");
 assert(_scoreRuntime(null) === 0, "null runtime → 0");
 
-assert(_scoreHardware({ consistent: true }) === 1.0, "consistent hardware → 1.0");
-assert(_scoreHardware({ consistent: false }) === 0.1, "inconsistent hardware → 0.1");
-assert(_scoreHardware({ consistent: true, gpuRenderer: "SwiftShader" }) < 1.0, "SwiftShader penalty");
+assert(_scoreHardware({ profile: { hardwareConcurrency: 8 } }) === 1.0, "clean hardware profile → 1.0");
+assert(_scoreHardware({ consistency: "discrepancies_observed" }) <= 0.9, "inconsistent hardware → penalized");
+assert(_scoreHardware({ webgl: { softwareRasterizers: ["SwiftShader"] } }) < 0.7, "SwiftShader penalty");
 
-assert(_scoreKinematics({ humanLike: false }) === 0.05, "non-human kinematics → 0.05");
-assert(_scoreKinematics({ humanLike: true, entropy: 0.9, eventCount: 100 }) > 0.7, "good kinematics → high");
+assert(_scoreKinematics({ eventCounts: { rejectedUntrusted: 50, mousemove: 5 } }) < 0.25, "rejected untrusted kinematics → penalized");
+assert(_scoreKinematics({ eventCounts: { mousemove: 100 }, mouse: { pointCount: 20, entropyRatio: 0.9 } }) > 0.4, "good kinematics → high");
 
-assert(_scorePoW({ valid: true }) > 0.5, "valid PoW → high");
-assert(_scorePoW({ valid: false }) === 0, "invalid PoW → 0");
+assert(_scorePoW({ serverVerified: true, durationMs: 400, difficulty: 16 }) > 0.7, "server-verified PoW → high");
+assert(_scorePoW({ serverVerified: false }) === 0, "unverified PoW → 0");
 assert(_scorePoW(null) === 0, "null PoW → 0");
 
 // Composite scoring
 {
   const full = computeScore({
-    runtime: { tampered: false },
-    hardware: { consistent: true },
-    kinematics: { humanLike: true, entropy: 0.8, eventCount: 150 },
-    pow: { valid: true, durationMs: 500, difficulty: 16 },
+    runtime: { confidence_penalty: 0, anomalies: [] },
+    hardware: { profile: { hardwareConcurrency: 8 }, consistency: "consistent" },
+    kinematics: { eventCounts: { mousemove: 80 }, mouse: { pointCount: 20, entropyRatio: 0.85 } },
+    pow: { serverVerified: true, durationMs: 450, difficulty: 16 },
   });
   assert(full.score > 0.7, `full human payload → high score (${full.score})`);
   assert(full.clamped === false, "no clamp for clean payload");
 }
 
-// Hard clamp: tampered runtime
+// Hard clamp: tampered runtime (confidence_penalty >= 0.5)
 {
   const tampered = computeScore({
-    runtime: { tampered: true },
-    hardware: { consistent: true },
-    kinematics: { humanLike: true, entropy: 0.9 },
-    pow: { valid: true },
+    runtime: { confidence_penalty: 0.8 },
+    hardware: { profile: { hardwareConcurrency: 8 } },
+    kinematics: { eventCounts: { mousemove: 50 }, mouse: { pointCount: 15, entropyRatio: 0.9 } },
+    pow: { serverVerified: true },
   });
   assert(tampered.score <= 0.1, `tampered → clamped ≤ 0.1 (${tampered.score})`);
   assert(tampered.clamped === true, "clamped flag set");
-  assert(tampered.clampReason.includes("tampered"), "clamp reason mentions tamper");
+  assert(tampered.clampReason.includes("tamper"), "clamp reason mentions tamper");
 }
 
 // Hard clamp: failed PoW
 {
   const noPow = computeScore({
-    runtime: { tampered: false },
-    hardware: { consistent: true },
-    kinematics: { humanLike: true },
-    pow: { valid: false },
+    runtime: { confidence_penalty: 0 },
+    hardware: { profile: { hardwareConcurrency: 8 } },
+    kinematics: { eventCounts: { mousemove: 50 } },
+    pow: { serverVerified: false },
   });
   assert(noPow.score <= 0.1, `failed PoW → clamped ≤ 0.1 (${noPow.score})`);
   assert(noPow.clamped === true, "clamped flag for failed PoW");
@@ -125,8 +125,8 @@ assert(_scorePoW(null) === 0, "null PoW → 0");
 // Hard clamp: tampered + failed PoW → 0.0
 {
   const worst = computeScore({
-    runtime: { tampered: true },
-    pow: { valid: false },
+    runtime: { confidence_penalty: 0.8 },
+    pow: { serverVerified: false },
   });
   assert(worst.score === 0.0, "tampered + no PoW → 0.0");
   assert(worst.clampReason.includes("AND"), "worst-case clamp reason");

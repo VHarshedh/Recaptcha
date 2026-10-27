@@ -1,19 +1,23 @@
 /**
- * scorer.js — Deterministic Weighted Scoring Pipeline
+ * scorer.js — Server-Side Raw Telemetry Scoring Pipeline
  *
- * Accepts combined telemetry signals and computes a final risk score
- * from 0.0 (high-confidence bot) to 1.0 (high-confidence human).
+ * Accepts raw feature vectors from the advanced client collectors and
+ * computes a final risk score from 0.0 (bot) to 1.0 (human).
+ *
+ * CRITICAL: This module NEVER trusts client-computed booleans like
+ * `tampered`, `consistent`, or `humanLike`. All thresholds and
+ * pass/fail decisions are computed server-side from raw signal data.
  *
  * Signal groups:
- *   1. Runtime Integrity  (weight 0.30)
- *   2. Hardware Consistency (weight 0.20)
- *   3. Kinematics          (weight 0.25)
- *   4. Proof-of-Work       (weight 0.25)
+ *   1. Runtime Integrity   (weight 0.30) — confidence_penalty, anomalies
+ *   2. Hardware Consistency (weight 0.20) — WebGL, audio, geometry, anomalies
+ *   3. Kinematics           (weight 0.25) — jerk, entropy, spectrum, eventCounts
+ *   4. Proof-of-Work        (weight 0.25) — server-verified nonce
  *
  * Hard-clamp rules:
- *   • runtime.tampered === true        → max score 0.1
- *   • pow.valid === false              → max score 0.1
- *   • runtime.tampered && !pow.valid   → score forced to 0.0
+ *   • runtime penalty >= 0.5              → max score 0.1
+ *   • pow.serverVerified !== true         → max score 0.1
+ *   • both runtime tampered AND PoW fail  → score forced to 0.0
  */
 
 "use strict";
@@ -23,10 +27,10 @@
 /* ------------------------------------------------------------------ */
 
 const WEIGHTS = Object.freeze({
-  runtime:  0.30,
-  hardware: 0.20,
+  runtime:    0.30,
+  hardware:   0.20,
   kinematics: 0.25,
-  pow:      0.25,
+  pow:        0.25,
 });
 
 // Sanity-check: weights must sum to 1.0.
@@ -36,28 +40,37 @@ if (Math.abs(SUM - 1.0) > 1e-9) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Per-signal sub-scorers                                             */
+/*  Per-signal sub-scorers (raw telemetry — NO client booleans)        */
 /* ------------------------------------------------------------------ */
 
 /**
  * Runtime Integrity sub-score (0–1).
  *
- * Input shape:
- *   { tampered: boolean, signals?: { devtools?: bool, debugger?: bool, ... } }
+ * Input: raw output from root-level RuntimeIntegrity.collect():
+ *   { tampering_detected: bool, anomalies: string[], confidence_penalty: number }
+ *
+ * The confidence_penalty is computed from corroborated anomaly groups
+ * (V8 receiver checks, native-function toString, Plugin/MIME graphs,
+ * automation globals, stack inspection).  We use it directly as the
+ * trust-reduction signal.  tampering_detected = (penalty >= 0.5).
  */
 function scoreRuntime(rt) {
   if (!rt || typeof rt !== "object") return 0;
-  if (rt.tampered === true) return 0;
 
-  let score = 1.0;
-  const s = rt.signals || {};
+  const penalty = typeof rt.confidence_penalty === "number"
+    ? clamp01(rt.confidence_penalty)
+    : 1;
 
-  if (s.devtools === true)          score -= 0.40;
-  if (s.debugger === true)          score -= 0.30;
-  if (s.domManipulation === true)   score -= 0.20;
-  if (s.automationAPIs === true)    score -= 0.50;
-  if (s.iframeEmbedded === true)    score -= 0.15;
-  if (s.consoleOverride === true)   score -= 0.10;
+  // If the advanced collector determined tampering (penalty >= 0.5), hard-cap.
+  if (penalty >= 0.5) return clamp01(0.15 * (1 - penalty));
+
+  // Proportional reduction from anomalies.
+  let score = 1.0 - penalty * 0.8;
+
+  // Additional signal: count of anomalies as a breadth indicator.
+  if (Array.isArray(rt.anomalies) && rt.anomalies.length > 5) {
+    score -= 0.1 * clamp01((rt.anomalies.length - 5) / 10);
+  }
 
   return clamp01(score);
 }
@@ -65,58 +78,178 @@ function scoreRuntime(rt) {
 /**
  * Hardware Consistency sub-score (0–1).
  *
- * Input shape:
- *   { consistent: boolean, gpuRenderer?: string, cores?: number,
- *     memory?: number, touchSupport?: boolean, screenConsistent?: boolean }
+ * Input: raw output from root-level HardwareConsistency.collect():
+ *   { version, profile, webgl, audio, fonts, geometry,
+ *     anomalies: [{probe,code,detail,strength}], timing, consistency }
  */
 function scoreHardware(hw) {
   if (!hw || typeof hw !== "object") return 0;
-  if (hw.consistent === false) return 0.1;
 
   let score = 1.0;
 
-  // Headless indicators.
-  if (hw.cores === 0 || hw.memory === 0)             score -= 0.50;
-  if (typeof hw.gpuRenderer === "string" &&
-      /swiftshader|llvmpipe|mesa/i.test(hw.gpuRenderer)) score -= 0.40;
-  if (hw.touchSupport === false && hw.mobile === true)  score -= 0.20;
-  if (hw.screenConsistent === false)                    score -= 0.15;
+  // ── WebGL signals ─────────────────────────────────────────────────
+  if (hw.webgl && typeof hw.webgl === "object") {
+    if (Array.isArray(hw.webgl.softwareRasterizers) &&
+        hw.webgl.softwareRasterizers.length > 0) {
+      score -= 0.35;
+    }
+    if (hw.webgl.legacyDirect3D9 === true) {
+      score -= 0.10;
+    }
+    if (hw.webgl.status === "unavailable") {
+      score -= 0.15;
+    }
+  }
+
+  // ── Audio probe ───────────────────────────────────────────────────
+  if (hw.audio && typeof hw.audio === "object") {
+    if (hw.audio.silent === true) score -= 0.15;
+    if (hw.audio.status === "error") score -= 0.10;
+  }
+
+  // ── Profile checks ───────────────────────────────────────────────
+  if (hw.profile && typeof hw.profile === "object") {
+    if (hw.profile.hardwareConcurrency === 0 ||
+        hw.profile.hardwareConcurrency === null) {
+      score -= 0.30;
+    }
+  }
+
+  // ── Geometry checks ───────────────────────────────────────────────
+  if (hw.geometry && typeof hw.geometry === "object" && hw.geometry.checks) {
+    const checks = hw.geometry.checks;
+    if (checks.outerAtLeastInner === false)     score -= 0.05;
+    if (checks.availableWithinScreen === false) score -= 0.05;
+  }
+
+  // ── Structured anomalies from the advanced collector ──────────────
+  if (Array.isArray(hw.anomalies)) {
+    const moderate = hw.anomalies.filter(a => a.strength === "moderate").length;
+    const weak     = hw.anomalies.filter(a => a.strength === "weak").length;
+    score -= moderate * 0.15;
+    score -= weak * 0.03;
+  }
+
+  // ── Overall consistency assessment ────────────────────────────────
+  if (hw.consistency === "discrepancies_observed") {
+    score -= 0.10;
+  }
 
   return clamp01(score);
 }
 
 /**
- * Kinematics (mouse / touch / keyboard) sub-score (0–1).
+ * Kinematics sub-score (0–1).
  *
- * Input shape:
- *   { humanLike: boolean, entropy?: number (0–1),
- *     straightLineRatio?: number (0–1), eventCount?: number,
- *     avgVelocity?: number, jitter?: number }
+ * Input: raw output from root-level Kinematics.getBiometricVector():
+ *   { version, running, historyCount, historyCapacity,
+ *     eventCounts: { mousemove, touchstart, ..., rejectedUntrusted, ... },
+ *     mouse: { pointCount, velocity, acceleration, jerk, entropyRatio,
+ *              zeroJerkRatio, nearConstantJerkRatio, tremorSpectrum,
+ *              ballisticHomingScore, ... },
+ *     touch: { ... same ... },
+ *     typing: { dwell: {milliseconds,normalized,coefficientOfVariation},
+ *               interval: {...}, flight: {...} },
+ *     flags: [ { code, evidence } ] }
  */
 function scoreKinematics(kin) {
   if (!kin || typeof kin !== "object") return 0;
-  if (kin.humanLike === false) return 0.05;
 
-  let score = 0.5; // baseline: "we have *some* events"
+  let score = 0.25; // baseline: "script loaded and captured something"
 
-  // Entropy bonus: high entropy → more human-like.
-  if (typeof kin.entropy === "number") {
-    score += 0.3 * clamp01(kin.entropy);
+  const counts = kin.eventCounts || {};
+  const totalEvents =
+    (counts.mousemove || 0) + (counts.touchstart || 0) +
+    (counts.touchmove || 0) + (counts.keydown || 0);
+
+  // ── Untrusted event rejection ─────────────────────────────────────
+  // dispatchEvent() / new MouseEvent() have isTrusted=false.
+  // The advanced kinematics module rejects and counts them.
+  if (typeof counts.rejectedUntrusted === "number" &&
+      counts.rejectedUntrusted > 0 && totalEvents > 0) {
+    const untrustedRatio =
+      counts.rejectedUntrusted / (totalEvents + counts.rejectedUntrusted);
+    score -= 0.25 * clamp01(untrustedRatio);
   }
 
-  // Straight-line penalty: bots tend toward 1.0.
-  if (typeof kin.straightLineRatio === "number") {
-    score -= 0.2 * clamp01(kin.straightLineRatio);
+  // ── Event count bonus (log-scaled) ────────────────────────────────
+  if (totalEvents > 0) {
+    score += 0.12 * clamp01(Math.log2(totalEvents + 1) / 8);
+  } else {
+    score -= 0.10;
   }
 
-  // Event count bonus (log-scaled, cap at ~200 events).
-  if (typeof kin.eventCount === "number" && kin.eventCount > 0) {
-    score += 0.15 * clamp01(Math.log2(kin.eventCount + 1) / 8);
+  // ── Mouse movement analysis ───────────────────────────────────────
+  const mouse = kin.mouse;
+  if (mouse && typeof mouse === "object" && mouse.pointCount > 8) {
+    // Angular entropy — high entropy means varied direction changes (human).
+    if (typeof mouse.entropyRatio === "number") {
+      score += 0.12 * clamp01(mouse.entropyRatio);
+    }
+
+    // Zero jerk ratio — exactly zero third derivative = polynomial path.
+    if (typeof mouse.zeroJerkRatio === "number" && mouse.zeroJerkRatio > 0.8) {
+      score -= 0.18;
+    }
+
+    // Near-constant jerk — bezier/linear interpolation.
+    if (typeof mouse.nearConstantJerkRatio === "number" &&
+        mouse.nearConstantJerkRatio > 0.9) {
+      score -= 0.12;
+    }
+
+    // Tremor spectrum 8–12 Hz band — human physiological tremor.
+    if (mouse.tremorSpectrum && typeof mouse.tremorSpectrum === "object" &&
+        typeof mouse.tremorSpectrum.band8to12HzRatio === "number") {
+      score += 0.08 * clamp01(mouse.tremorSpectrum.band8to12HzRatio * 5);
+    }
+
+    // Ballistic homing (bell-shaped velocity profile around peak).
+    if (typeof mouse.ballisticHomingScore === "number") {
+      score += 0.05 * clamp01(mouse.ballisticHomingScore);
+    }
+
+    // Velocity variance — too uniform = robotic.
+    if (mouse.velocity && typeof mouse.velocity.variance === "number" &&
+        mouse.velocity.count >= 10 && mouse.velocity.variance < 1e-6) {
+      score -= 0.10;
+    }
   }
 
-  // Jitter presence is human-like.
-  if (typeof kin.jitter === "number" && kin.jitter > 0.5) {
-    score += 0.05;
+  // ── Touch movement (same signals as mouse) ────────────────────────
+  const touch = kin.touch;
+  if (touch && typeof touch === "object" && touch.pointCount > 8) {
+    if (typeof touch.entropyRatio === "number") {
+      score += 0.08 * clamp01(touch.entropyRatio);
+    }
+    if (typeof touch.zeroJerkRatio === "number" && touch.zeroJerkRatio > 0.8) {
+      score -= 0.12;
+    }
+  }
+
+  // ── Typing cadence ────────────────────────────────────────────────
+  if (kin.typing && typeof kin.typing === "object") {
+    for (const field of ["dwell", "interval", "flight"]) {
+      const data = kin.typing[field];
+      if (data && data.milliseconds && data.milliseconds.count >= 8) {
+        // Human typing has natural variation in cadence.
+        if (typeof data.coefficientOfVariation === "number" &&
+            data.coefficientOfVariation > 0.1) {
+          score += 0.03;
+        }
+        // Suspiciously uniform (robot / macro).
+        if (typeof data.coefficientOfVariation === "number" &&
+            data.coefficientOfVariation < 0.02 &&
+            data.milliseconds.count >= 12) {
+          score -= 0.05;
+        }
+      }
+    }
+  }
+
+  // ── Flags from kinematics module ──────────────────────────────────
+  if (Array.isArray(kin.flags)) {
+    score -= 0.04 * Math.min(kin.flags.length, 4);
   }
 
   return clamp01(score);
@@ -125,31 +258,29 @@ function scoreKinematics(kin) {
 /**
  * Proof-of-Work sub-score (0–1).
  *
- * Input shape:
- *   { valid: boolean, durationMs?: number, difficulty?: number }
+ * Input (set exclusively by the server after cryptographic verification):
+ *   { serverVerified: bool, difficulty: number, durationMs: number,
+ *     reason?: string, hash?: string }
+ *
+ * The `serverVerified` flag is set by the server's verifyPoW() call —
+ * NOT by anything the client sends.
  */
 function scorePoW(pow) {
   if (!pow || typeof pow !== "object") return 0;
-  if (pow.valid !== true) return 0;
+  if (pow.serverVerified !== true) return 0;
 
-  let score = 0.80; // valid PoW = strong baseline
+  let score = 0.80; // valid server-verified PoW = strong baseline.
 
-  // Duration reasonableness: if it was solved suspiciously fast for
-  // the given difficulty, dock some trust (ASICs / GPU farms).
-  if (typeof pow.durationMs === "number" && typeof pow.difficulty === "number") {
-    // Expected time ≈ 2^difficulty * ~2µs per hash (rough heuristic).
+  // Duration reasonableness: very fast solutions → ASIC/GPU farm.
+  if (typeof pow.durationMs === "number" &&
+      typeof pow.difficulty === "number") {
     const expectedMs = Math.pow(2, pow.difficulty) * 0.002;
     const ratio = pow.durationMs / Math.max(expectedMs, 1);
-    if (ratio < 0.01) {
-      // Solved >100× faster than expected — suspicious.
-      score -= 0.30;
-    } else if (ratio < 0.1) {
-      score -= 0.10;
-    } else {
-      score += 0.20; // normal range — full credit.
-    }
+    if (ratio < 0.01)       score -= 0.30; // >100× faster than expected
+    else if (ratio < 0.1)   score -= 0.10; // >10× faster
+    else                    score += 0.20; // normal range
   } else {
-    score += 0.10; // no timing data but valid proof — still decent.
+    score += 0.10;
   }
 
   return clamp01(score);
@@ -160,17 +291,9 @@ function scorePoW(pow) {
 /* ------------------------------------------------------------------ */
 
 /**
- * @typedef {Object} TelemetryPayload
- * @property {Object} [runtime]
- * @property {Object} [hardware]
- * @property {Object} [kinematics]
- * @property {Object} [pow]
- */
-
-/**
- * Compute the composite risk score.
+ * Compute the composite risk score from raw telemetry.
  *
- * @param {TelemetryPayload} payload
+ * @param {Object} payload — decrypted and server-enriched telemetry
  * @returns {{ score: number, breakdown: Object, clamped: boolean, clampReason?: string }}
  */
 function computeScore(payload) {
@@ -200,8 +323,11 @@ function computeScore(payload) {
   let clamped = false;
   let clampReason;
 
-  const tampered = payload.runtime?.tampered === true;
-  const powFailed = !payload.pow || payload.pow.valid !== true;
+  // Use raw confidence_penalty from the advanced collector — NOT client
+  // booleans.  tampering_detected = (confidence_penalty >= 0.5).
+  const runtimePenalty = payload.runtime?.confidence_penalty;
+  const tampered = typeof runtimePenalty === "number" && runtimePenalty >= 0.5;
+  const powFailed = !payload.pow || payload.pow.serverVerified !== true;
 
   if (tampered && powFailed) {
     score = 0.0;
@@ -210,11 +336,11 @@ function computeScore(payload) {
   } else if (tampered) {
     score = Math.min(score, 0.1);
     clamped = true;
-    clampReason = "runtime tampered";
+    clampReason = "runtime tampered (confidence_penalty >= 0.5)";
   } else if (powFailed) {
     score = Math.min(score, 0.1);
     clamped = true;
-    clampReason = "PoW validation failed";
+    clampReason = "PoW server verification failed";
   }
 
   score = round4(clamp01(score));

@@ -20,8 +20,28 @@ const { issueToken } = require("./token");
 const { verifyToken } = require("./verifier");
 const { maskIP } = require("./ip_mask");
 const { publicKeyPem } = require("./keys");
+const { createMiddleware, createDecryptHandler, SessionStore } = require("../compiler/middleware");
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
+
+const sessionStore = new SessionStore();
+const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessionStore });
+
+/* ------------------------------------------------------------------ */
+/*  Safe IP extraction (Vuln 5 fix)                                    */
+/* ------------------------------------------------------------------ */
+
+function getClientIP(req) {
+  // Only trust X-Forwarded-For if explicitly configured via TRUST_PROXY=1.
+  // When enabled, only the rightmost entry (appended by the trusted proxy) is used.
+  if (process.env.TRUST_PROXY === "1" && req.headers["x-forwarded-for"]) {
+    const parts = req.headers["x-forwarded-for"].split(",").map(s => s.trim()).filter(Boolean);
+    if (parts.length > 0) {
+      return parts[parts.length - 1];
+    }
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
 
 /* ------------------------------------------------------------------ */
 /*  Request body parser (JSON, capped at 64 KB)                        */
@@ -49,36 +69,16 @@ function readBody(req, maxBytes = 65_536) {
 /*  Route handlers                                                     */
 /* ------------------------------------------------------------------ */
 
-async function handleAttest(req, res) {
-  // ── Parse body ────────────────────────────────────────────────────
-  let body;
-  try {
-    const raw = await readBody(req);
-    body = JSON.parse(raw.toString("utf-8"));
-  } catch (err) {
-    return json(res, 400, { error: "invalid JSON", detail: err.message });
-  }
-
-  if (!body || typeof body !== "object") {
-    return json(res, 400, { error: "request body must be a JSON object" });
-  }
-
-  // ── Extract action ───────────────────────────────────────────────
-  const action = typeof body.action === "string" && body.action.length > 0
-    ? body.action
+// POST /attest handler — mandatory ECDH decryption + server-verified PoW
+const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res) => {
+  const action = typeof telemetry.action === "string" && telemetry.action.length > 0
+    ? telemetry.action
     : "unknown";
 
-  // ── Determine client subnet ──────────────────────────────────────
-  const clientIP =
-    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-    req.socket?.remoteAddress ||
-    "unknown";
+  const clientIP = getClientIP(req);
   const ipSubnet = maskIP(clientIP);
 
-  // ── Score ─────────────────────────────────────────────────────────
-  const { score, breakdown, clamped, clampReason } = computeScore(body);
-
-  // ── Issue token ───────────────────────────────────────────────────
+  const { score, breakdown, clamped, clampReason } = computeScore(telemetry);
   const { token, claims } = issueToken({ score, action, ipSubnet });
 
   return json(res, 200, {
@@ -89,7 +89,7 @@ async function handleAttest(req, res) {
     token,
     claims,
   });
-}
+});
 
 function handleVerify(req, res) {
   // Quick inline verification endpoint for integration tests.
@@ -132,8 +132,9 @@ const server = http.createServer(async (req, res) => {
   const url = req.url?.split("?")[0];
 
   try {
-    if (url === "/attest" && req.method === "POST") return await handleAttest(req, res);
-    if (url === "/verify" && req.method === "POST") return await handleVerify(req, res);
+    if (url === "/collector.js" && req.method === "GET") return collectorMiddleware(req, res);
+    if (url === "/attest" && req.method === "POST") return handleAttest(req, res);
+    if (url === "/verify" && req.method === "POST") return handleVerify(req, res);
     if (url === "/pubkey" && req.method === "GET")  return handlePubkey(req, res);
     if (url === "/health" && req.method === "GET")  return handleHealth(req, res);
 

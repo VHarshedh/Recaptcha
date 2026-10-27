@@ -20,6 +20,7 @@
 const http = require("node:http");
 const { compile } = require("./pipeline");
 const { decryptTelemetry } = require("./ecdh_session");
+const { generateChallenge, verifyPoW } = require("../pow_verifier");
 
 /* ------------------------------------------------------------------ */
 /*  ECDH session store (in-memory, keyed by session ID)                */
@@ -36,15 +37,16 @@ class SessionStore {
     this._ttlMs   = ttlMs;
   }
 
-  /** Store a session's ECDH private key. */
-  set(sessionId, ecdhKeyPair) {
+  /** Store a session's ECDH key pair and PoW challenge. */
+  set(sessionId, data) {
     // Evict oldest if at capacity.
     if (this._map.size >= this._maxSize) {
       const oldest = this._map.keys().next().value;
       this._map.delete(oldest);
     }
+    const entry = (data && data.keyPair) ? data : { keyPair: data };
     this._map.set(sessionId, {
-      keyPair: ecdhKeyPair,
+      ...entry,
       createdAt: Date.now(),
     });
   }
@@ -55,7 +57,10 @@ class SessionStore {
     if (!entry) return null;
     this._map.delete(sessionId);
     if (Date.now() - entry.createdAt > this._ttlMs) return null;
-    return entry.keyPair;
+    if (entry.keyPair) {
+      return Object.assign(Object.create(entry.keyPair), entry);
+    }
+    return entry;
   }
 
   get size() { return this._map.size; }
@@ -84,14 +89,22 @@ function createMiddleware(opts = {}) {
 
   function handler(req, res, next) {
     try {
+      const { challenge, issuedAt } = generateChallenge();
+      const difficulty = 16;
+
       const { bundle, buildId, ecdhKeyPair, stats } = compile({
         attestEndpoint,
         deadCodeBlocks,
+        powChallenge: challenge,
+        powDifficulty: difficulty,
       });
 
-      // Store session for later telemetry decryption.
+      // Store session for later telemetry decryption and PoW verification.
       if (ecdhKeyPair) {
-        sessionStore.set(ecdhKeyPair.id, ecdhKeyPair);
+        sessionStore.set(ecdhKeyPair.id, {
+          keyPair: ecdhKeyPair,
+          pow: { challenge, difficulty, issuedAt },
+        });
       }
 
       // Strict no-cache, no-store.
@@ -133,6 +146,9 @@ function createMiddleware(opts = {}) {
  * Create a handler for POST /attest that decrypts the ECDH-encrypted
  * telemetry and forwards the plaintext to the scoring pipeline.
  *
+ * Enforces mandatory ECDH encryption (rejects plaintext payloads with 403)
+ * and cryptographically verifies the server-issued PoW challenge.
+ *
  * @param {SessionStore} sessionStore
  * @param {Function}     onTelemetry — callback(plaintext, req, res)
  * @returns {Function}   (req, res) => void
@@ -151,21 +167,56 @@ function createDecryptHandler(sessionStore, onTelemetry) {
         chunks.push(chunk);
       }
 
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-
-      // If payload is ECDH-encrypted, decrypt first.
-      if (body.cpk && body.iv && body.ct && body.sid) {
-        const kp = sessionStore.consume(body.sid);
-        if (!kp) {
-          res.writeHead(403, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ error: "unknown or expired session" }));
-        }
-        const plaintext = decryptTelemetry(body, kp.privateKey);
-        return onTelemetry(plaintext, req, res);
+      let body;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+      } catch (parseErr) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "invalid JSON" }));
       }
 
-      // Unencrypted fallback (e.g. ECDH disabled).
-      return onTelemetry(body, req, res);
+      // Mandatory ECDH — reject plaintext or missing crypto envelope
+      if (!body || !body.cpk || !body.iv || !body.ct || !body.sid) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "missing or invalid encrypted payload envelope" }));
+      }
+
+      const session = sessionStore.consume(body.sid);
+      if (!session) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "unknown or expired session" }));
+      }
+
+      const keyPair = session.keyPair || session;
+      const plaintext = decryptTelemetry(body, keyPair.privateKey);
+
+      // Cryptographically verify PoW challenge server-side
+      const clientPoW = plaintext.pow || {};
+      const expectedChallenge = session.pow?.challenge;
+      const expectedDifficulty = session.pow?.difficulty || 16;
+      const issuedAt = session.pow?.issuedAt ||
+        (expectedChallenge ? parseInt(expectedChallenge.split(".")[0], 10) : Date.now());
+
+      let powVerification = { valid: false, reason: "challenge mismatch" };
+      if (expectedChallenge && clientPoW.challenge === expectedChallenge) {
+        powVerification = verifyPoW({
+          challenge: expectedChallenge,
+          nonce: clientPoW.nonce,
+          difficulty: expectedDifficulty,
+          issuedAt: issuedAt,
+        });
+      }
+
+      // Overwrite client-reported PoW with server's verification
+      plaintext.pow = {
+        serverVerified: powVerification.valid,
+        difficulty: expectedDifficulty,
+        durationMs: clientPoW.durationMs,
+        hash: powVerification.hash,
+        reason: powVerification.reason,
+      };
+
+      return onTelemetry(plaintext, req, res);
     } catch (err) {
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });

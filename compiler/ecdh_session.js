@@ -66,9 +66,29 @@ function generateEphemeralKeyPair() {
 function generateClientECDHCode(serverPubKeyBase64, sessionId, fnName) {
   const name = fnName || "encryptAndSend";
 
-  // The generated code is deliberately verbose with bracket notation so
-  // the string encryption pass can encrypt every identifiable string.
+  // The generated code captures pristine references to Web Crypto and
+  // encoding primitives BEFORE any application code can proxy them.
+  // All subsequent encryption uses these captured refs, preventing
+  // post-load JSON.stringify / crypto.subtle hooking attacks.
   return `
+var _subtle = crypto["subtle"];
+var _jsonStringify = JSON["stringify"];
+var _TextEncoder = TextEncoder;
+var _getRandomValues = crypto["getRandomValues"]["bind"](crypto);
+
+(function() {
+  var _fts = Function["prototype"]["toString"];
+  function _isNative(fn) {
+    return typeof fn === "function" &&
+      _fts["call"](fn)["indexOf"]("[native code]") !== -1;
+  }
+  if (!_isNative(_jsonStringify) || !_isNative(_subtle["encrypt"]) ||
+      !_isNative(_subtle["importKey"]) || !_isNative(_subtle["generateKey"]) ||
+      !_isNative(_subtle["deriveBits"]) || !_isNative(_subtle["exportKey"])) {
+    throw new Error("integrity");
+  }
+})();
+
 async function ${name}(payloadObj, endpointUrl) {
   var spkiB64 = "${serverPubKeyBase64}";
   var sessionId = "${sessionId}";
@@ -79,7 +99,7 @@ async function ${name}(payloadObj, endpointUrl) {
     spkiBytes[si] = spkiRaw["charCodeAt"](si);
   }
 
-  var serverPub = await crypto["subtle"]["importKey"](
+  var serverPub = await _subtle["importKey"](
     "spki",
     spkiBytes["buffer"],
     { "name": "ECDH", "namedCurve": "P-256" },
@@ -87,19 +107,19 @@ async function ${name}(payloadObj, endpointUrl) {
     []
   );
 
-  var clientKP = await crypto["subtle"]["generateKey"](
+  var clientKP = await _subtle["generateKey"](
     { "name": "ECDH", "namedCurve": "P-256" },
     true,
     ["deriveBits"]
   );
 
-  var sharedBits = await crypto["subtle"]["deriveBits"](
+  var sharedBits = await _subtle["deriveBits"](
     { "name": "ECDH", "public": serverPub },
     clientKP["privateKey"],
     256
   );
 
-  var aesKey = await crypto["subtle"]["importKey"](
+  var aesKey = await _subtle["importKey"](
     "raw",
     sharedBits,
     { "name": "AES-GCM" },
@@ -107,16 +127,16 @@ async function ${name}(payloadObj, endpointUrl) {
     ["encrypt"]
   );
 
-  var ivBytes = crypto["getRandomValues"](new Uint8Array(12));
-  var plainBytes = new TextEncoder()["encode"](JSON["stringify"](payloadObj));
+  var ivBytes = _getRandomValues(new Uint8Array(12));
+  var plainBytes = new _TextEncoder()["encode"](_jsonStringify(payloadObj));
 
-  var cipherBuf = await crypto["subtle"]["encrypt"](
+  var cipherBuf = await _subtle["encrypt"](
     { "name": "AES-GCM", "iv": ivBytes },
     aesKey,
     plainBytes
   );
 
-  var clientPubSpki = await crypto["subtle"]["exportKey"]("spki", clientKP["publicKey"]);
+  var clientPubSpki = await _subtle["exportKey"]("spki", clientKP["publicKey"]);
 
   function toB64(arrBuf) {
     var bytes = new Uint8Array(arrBuf);
@@ -136,7 +156,7 @@ async function ${name}(payloadObj, endpointUrl) {
   return fetch(endpointUrl, {
     "method": "POST",
     "headers": { "Content-Type": "application/json" },
-    "body": JSON["stringify"](wireMsg)
+    "body": _jsonStringify(wireMsg)
   });
 }
 `;
