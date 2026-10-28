@@ -27,7 +27,7 @@ const { generateEphemeralKeyPair, generateClientECDHCode } = require("./ecdh_ses
 /*  Source module paths                                                 */
 /* ------------------------------------------------------------------ */
 
-const { invariantHash, mixRuntimeState, executionCanary } = require("./runtime_state");
+const { invariantHash, mixRuntimeState, executionCanary, executeProgram, telemetryShape } = require("./runtime_state");
 
 const ROOT_DIR   = path.join(__dirname, "..");
 const CLIENT_DIR = path.join(__dirname, "..", "client");
@@ -66,6 +66,24 @@ function preprocess(src) {
  * Name generator factory — returns a function that produces unique
  * crypto-random JS identifiers on each call.
  */
+const templateCache = new Map();
+const resolvedSources = new Map();
+function readTemplate(file) {
+  const key = path.resolve(file);
+  if (!templateCache.has(key)) templateCache.set(key, preprocess(fs.readFileSync(key, "utf8")));
+  return templateCache.get(key);
+}
+function clientTemplate(sourceDir, file) {
+  const key = path.resolve(sourceDir, file);
+  if (!resolvedSources.has(key)) {
+    const found = [key, path.join(sourceDir, "client", file), path.join(CLIENT_DIR, file)].find(fp => fs.existsSync(fp));
+    resolvedSources.set(key, found ? readTemplate(found) : "");
+  }
+  return resolvedSources.get(key);
+}
+for (const file of SOURCE_LIST) clientTemplate(ROOT_DIR, file);
+readTemplate(path.join(__dirname, "step_up.js"));
+
 function createNameGenerator() {
   const used = new Set();
   const FIRST = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$";
@@ -96,7 +114,7 @@ function createNameGenerator() {
  * @param {number} powDifficulty
  * @returns {string}
  */
-function generateFlattenedMain(names, endpoint, powChallenge, powDifficulty, vmSeed, stepConsts) {
+function generateFlattenedMain(names, endpoint, powChallenge, powDifficulty, vmSeed, stepConsts, program) {
   // Generate random case labels and a random dispatch order.
   const caseValues = [];
   for (let i = 0; i < 8; i++) caseValues.push(crypto.randomInt(10, 9999));
@@ -107,17 +125,27 @@ function generateFlattenedMain(names, endpoint, powChallenge, powDifficulty, vmS
 
   const SENTINEL = crypto.randomInt(10000, 99999);
 
+  const slots = [vmSeed, ...stepConsts].map(value => {
+    const a = crypto.randomBytes(4).readInt32BE(), b = crypto.randomBytes(4).readInt32BE() | 1;
+    const c = (Math.imul(a, b) ^ value) | 0;
+    return '(function(a){return function(b){return function(){return Math["imul"](a,b)^(' + c + ');};}(' + b + ');}(' + a + '))';
+  });
   return `
+var stateSlots = [${slots.join(",")}];
+var challengeProgram = ${JSON.stringify(program)};
+${executeProgram.toString()}
+${telemetryShape.toString()}
 ${invariantHash.toString()}
 ${mixRuntimeState.toString()}
 ${executionCanary.toString()}
 function canvasInvariant() {
   var probe = document["createElement"]("canvas");
-  probe["width"] = 2; probe["height"] = 2;
+  probe["width"] = (challengeProgram[2][0] >>> 0) % 13 + 2;
+  probe["height"] = (challengeProgram[1][0] >>> 0) % 11 + 3;
   var context = probe["getContext"]("2d");
   if (!context) return 0x1357;
   context["fillRect"](0, 0, 1, 1);
-  return probe["width"] ^ probe["height"];
+  return Math["imul"](probe["width"], probe["height"]) ^ challengeProgram[5][0];
 }
 var ${names.kinRef} = (typeof globalThis !== "undefined" && globalThis["Kinematics"]) || (typeof window !== "undefined" && window["Kinematics"]) || (typeof Kinematics !== "undefined" ? Kinematics : null);
 if (${names.kinRef} && typeof ${names.kinRef}["start"] === "function") {
@@ -131,31 +159,31 @@ var ${names.powPromise} = solvePoW({
 
 async function ${names.mainFn}(${names.actionParam}) {
   var ${names.collector} = {};
-  var ${names.vmState} = ${vmSeed};
+  var ${names.vmState} = stateSlots[0]();
   var ${names.state} = ${cv[0]};
   var ${names.retVal} = null;
   while (${names.state} !== ${SENTINEL}) {
     switch (${names.state}) {
       case ${cv[0]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[0]}, invariantHash(typeof globalThis["RuntimeIntegrity"]["collect"]) ^ invariantHash(Object["prototype"]["toString"]["call"](window["navigator"])));
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[1](), (invariantHash(typeof globalThis["RuntimeIntegrity"]["collect"]) ^ invariantHash(Object["prototype"]["toString"]["call"](window["navigator"]))) ^ executeProgram(challengeProgram, 0));
         var ${names.rtRef} = (typeof globalThis !== "undefined" && globalThis["RuntimeIntegrity"]) || (typeof window !== "undefined" && window["RuntimeIntegrity"]) || (typeof RuntimeIntegrity !== "undefined" ? RuntimeIntegrity : null);
         ${names.collector}["runtime"] = (${names.rtRef} && typeof ${names.rtRef}["collect"] === "function") ? ${names.rtRef}["collect"]() : {};
         ${names.state} = ${cv[1]};
         break;
       case ${cv[1]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[1]}, (Function["prototype"]["toString"]["call"](Function["prototype"]["toString"])["includes"]("[native code]") ? 1 : 0));
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[2](), ((Function["prototype"]["toString"]["call"](Function["prototype"]["toString"])["includes"]("[native code]") ? 1 : 0)) ^ executeProgram(challengeProgram, 1));
         var ${names.hwRef} = (typeof globalThis !== "undefined" && globalThis["HardwareConsistency"]) || (typeof window !== "undefined" && window["HardwareConsistency"]) || (typeof HardwareConsistency !== "undefined" ? HardwareConsistency : null);
         ${names.collector}["hardware"] = (${names.hwRef} && typeof ${names.hwRef}["collect"] === "function") ? await ${names.hwRef}["collect"]() : {};
         ${names.state} = ${cv[2]};
         break;
       case ${cv[2]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[2]}, executionCanary() ^ canvasInvariant());
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[3](), (executionCanary() ^ canvasInvariant()) ^ executeProgram(challengeProgram, 2));
         var ${names.kinSnap} = (typeof globalThis !== "undefined" && globalThis["Kinematics"]) || (typeof window !== "undefined" && window["Kinematics"]) || (typeof Kinematics !== "undefined" ? Kinematics : null);
         ${names.collector}["kinematics"] = (${names.kinSnap} && typeof ${names.kinSnap}["getBiometricVector"] === "function") ? ${names.kinSnap}["getBiometricVector"]() : {};
         ${names.state} = ${cv[3]};
         break;
       case ${cv[3]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[3]}, 0);
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[4](), (invariantHash(String(telemetryShape(${names.collector})))) ^ executeProgram(challengeProgram, 3));
         ${names.collector}["action"] = (typeof ${names.actionParam} === "string" && ${names.actionParam}["length"] > 0)
           ? ${names.actionParam}
           : ((typeof document !== "undefined" && document["body"])
@@ -164,7 +192,7 @@ async function ${names.mainFn}(${names.actionParam}) {
         ${names.state} = ${cv[4]};
         break;
       case ${cv[4]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[4]}, 0);
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[5](), (invariantHash(String(telemetryShape(${names.collector})))) ^ executeProgram(challengeProgram, 4));
         try {
           var ${names.powRes} = await ${names.powPromise};
           ${names.collector}["pow"] = {
@@ -182,7 +210,7 @@ async function ${names.mainFn}(${names.actionParam}) {
         ${names.state} = ${cv[5]};
         break;
       case ${cv[5]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, ${stepConsts[5]}, 0);
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[6](), (invariantHash(String(telemetryShape(${names.collector})))) ^ executeProgram(challengeProgram, 5));
         ${names.retVal} = await ${names.ecdhFn}(${names.collector}, "${endpoint}", ${names.vmState});
         ${names.state} = ${SENTINEL};
         break;
@@ -255,21 +283,12 @@ function compile(options = {}) {
   } else {
     const modules = [];
     for (const file of sourceFiles) {
-      let fp = path.join(sourceDir, file);
-      if (!fs.existsSync(fp)) {
-        fp = path.join(sourceDir, "client", file);
-      }
-      if (!fs.existsSync(fp)) {
-        fp = path.join(CLIENT_DIR, file);
-      }
-      if (fs.existsSync(fp)) {
-        modules.push(preprocess(fs.readFileSync(fp, "utf-8")));
-      }
+      modules.push(clientTemplate(sourceDir, file));
     }
     rawSource = modules.join("\n\n");
   }
 
-  rawSource += "\n" + preprocess(fs.readFileSync(path.join(__dirname, "step_up.js"), "utf-8"));
+  rawSource += "\n" + readTemplate(path.join(__dirname, "step_up.js"));
 
   // ── 2. Generate ECDH client code ──────────────────────────────────
   let ecdhKeyPair = null;
@@ -287,8 +306,12 @@ function compile(options = {}) {
   // ── 3. Generate flattened main collector ───────────────────────────
   const vmSeed = crypto.randomBytes(4).readInt32BE();
   const stepConsts = Array.from({ length: 6 }, () => crypto.randomBytes(4).readInt32BE());
-  const invariants = [invariantHash("function") ^ invariantHash("[object Navigator]"), 1, executionCanary(), 0, 0, 0];
-  const expectedVmState = stepConsts.reduce((state, step, i) => mixRuntimeState(state, step, invariants[i]), vmSeed);
+  const program = Array.from({ length: 6 }, () => [crypto.randomBytes(4).readInt32BE(),
+    ...Array.from({ length: 12 }, (_, i) => [i % 3, crypto.randomBytes(4).readInt32BE(), crypto.randomBytes(4).readInt32BE()])]);
+  const shape = invariantHash("7");
+  const canvasWord = Math.imul((program[2][0] >>> 0) % 13 + 2, (program[1][0] >>> 0) % 11 + 3) ^ program[5][0];
+  const invariants = [invariantHash("function") ^ invariantHash("[object Navigator]"), 1, executionCanary() ^ canvasWord, shape, shape, shape];
+  const expectedVmState = stepConsts.reduce((state, step, i) => mixRuntimeState(state, step, invariants[i] ^ executeProgram(program, i)), vmSeed);
   const mainNames = {
     vmState: nameGen(),
     kinRef:       nameGen(),
@@ -305,7 +328,7 @@ function compile(options = {}) {
     hook:         nameGen(),
     ecdhFn:       ecdhFnName,
   };
-  rawSource += "\n\n" + generateFlattenedMain(mainNames, attestEndpoint, activeChallenge, activeDifficulty, vmSeed, stepConsts);
+  rawSource += "\n\n" + generateFlattenedMain(mainNames, attestEndpoint, activeChallenge, activeDifficulty, vmSeed, stepConsts, program);
 
   // ── 4. String extraction & encryption ─────────────────────────────
   const strings      = extractStrings(rawSource);
@@ -339,6 +362,7 @@ function compile(options = {}) {
       difficulty: activeDifficulty,
     },
     stats: {
+      runtimeProgramDigest: crypto.createHash("sha256").update(JSON.stringify(program)).digest("hex"),
       strings:     strings.length,
       identifiers: identifiers.length,
       deadBlocks:  deadCodeBlocks,

@@ -18,6 +18,7 @@
 const crypto = require("node:crypto");
 const { publicKey } = require("./keys");
 const { maskIP, getClientIP } = require("./ip_mask");
+const { requestOrigin, requestHostOrigin } = require("./origin");
 const { NonceCache } = require("./nonce_cache");
 
 /* ------------------------------------------------------------------ */
@@ -151,6 +152,11 @@ function verifyToken(token, opts = {}) {
     return fail(`TTL out of range: ${ttl}s (must be 30–60)`);
   }
 
+  if (claims.origin && typeof opts.origin !== "string") return fail("expected origin required");
+  if (typeof opts.origin === "string" && claims.origin !== opts.origin) return fail("origin mismatch");
+  if (claims.host && typeof opts.host !== "string") return fail("expected host required");
+  if (typeof opts.host === "string" && claims.host !== opts.host) return fail("host mismatch");
+
   // ── Nonce replay protection ───────────────────────────────────────
   if (opts.skipNonce !== true) {
     if (!nonceCache.claim(claims.nonce)) {
@@ -228,7 +234,7 @@ function attestationMiddleware(opts = {}) {
     // Determine client IP (respects X-Forwarded-For for reverse proxies).
     const clientIP = getClientIP(req);
 
-    const result = verifyToken(token, { clientIP, action, minScore });
+    const result = verifyToken(token, { clientIP, action, minScore, origin: opts.origin || requestOrigin(req), host: opts.host || requestHostOrigin(req) });
 
     if (!result.valid) {
       return sendJSON(res, 403, {

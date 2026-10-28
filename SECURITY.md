@@ -6,9 +6,13 @@ constants, event counts, and engine error strings are available to or supplied
 by the client. A sufficiently capable client can reproduce them.
 
 Each build advances a random signed 32-bit state through six collector
-dispatch stages, mixing collector type, Navigator tag, native-function source,
-and deterministic Canvas/Math/ArrayBuffer execution invariants with rotations,
-integer multiplication and XORs. Its AES-256-GCM key is SHA-256(ECDH shared secret || state),
+dispatch stages. Each stage executes its own per-build randomized typed-array
+program with Float32 rounding, Int32 bit mixing and prototype descriptor checks.
+Seed and step values are reconstructed by split arithmetic closures. Collector
+type, Navigator tag, native-function source and canvas availability contribute
+additional checks; stages 3–5 also bind the collected telemetry's required shape.
+Typed-array programs avoid cross-platform canvas rasterization differences in
+the key derivation. Its AES-256-GCM key is SHA-256(ECDH shared secret || state),
 where state is four big-endian bytes. The server stores the expected state in
 the single-use session. Legacy raw-ECDH ciphertext and wrong-state ciphertext
 fail authentication. This defeats the former simple extractor's encryption
@@ -49,8 +53,20 @@ Successful step-up issues a score-0.70 token as an explicit policy override;
 human identity. Low-interaction submissions now require a visual answer.
 Visual submissions also require modal telemetry: zero untrusted events, six
 trusted character keydowns and completed dwell samples, first keystroke at least
-250ms after opening, at least 300ms typing, and positive dwell variance. These
+250ms after opening, at least 300ms typing, dwell variance >=4 ms² and interval
+variance >=8 ms². A trusted pointerdown on the answer field before typing, or a
+trusted focus change following a Tab/pointer action, is also required. Automatic
+focus alone does not qualify. These
 encrypted measurements are still client claims, not authenticated biometrics.
+
+Passive and modal collectors report zero screen/client offset, zero movement
+despite changed coordinates, and duplicate timestamp ratios. Eight or more
+screen/displacement samples with a >=90% suspicious ratio force visual step-up
+or reject a modal submission. Fullscreen screen-offset samples are excluded.
+These are heuristics: kiosk/window geometry, privacy settings and input devices
+can cause false positives. Error serialization getter counts are reported without
+an independent score penalty, since ordinary DevTools can trigger them too.
+No universal, false-positive-free CDP detection is possible from these signals.
 
 Visual instructions are AES-GCM encrypted with the session key. Only distorted
 closed cubic blobs and a noise descriptor are sent, with no
@@ -65,6 +81,11 @@ Promise. Load a fresh collector for another attempt; sessions are single-use.
 The worker uses local SHA-256 to avoid a Web Crypto round trip per candidate.
 All paths share `{d,color,layer}` and `M C C Z` structure. Glyph shards and clutter
 alternate over three layers at a target 60fps, with spatial jitter and noise.
+Decoys are connected pseudo-glyph clusters with the same paired-blob density and
+affine transformations as glyph strokes. Complementary twins occupy alternating
+layers. Paths use pre-shifted coordinates; the renderer applies encrypted
+`noise.layerOffsets`. A controlled client can recover these offsets and combine
+frames, so this complicates simple spatial filters rather than preventing OCR.
 Rendering timers may be throttled; each layer recurs at 20Hz. This requires
 real-browser readability and flicker testing. Freezing the animation for reduced
 motion would leave an incomplete glyph, so this policy currently requires animation.
@@ -86,9 +107,44 @@ failures subtract 0.50 and cap the score at 0.30, requiring visual plus difficul
 work. Eight failures in five minutes start a 60-second cooldown, doubling on repeat
 failure up to 15 minutes. Successful attestations reset consecutive failures, not
 the five-minute failure history. `createServer({rateLimit: {...}})` configures limits.
-Storage defaults to 10,000 subnets and fails closed at capacity; idle entries expire.
+Storage defaults to 10,000 subnets. At capacity, a separate ordered clean-entry
+index selects an eviction candidate in O(1). Failed/banned entries are protected;
+an indexed expiry heap reclassifies them after their failure window and cooldown
+expire. Expiry updates cost O(log n); storage remains bounded, without per-request
+full-map scans. Only a table consisting entirely of protected entries fails closed.
+Session stores default to 15 active sessions per subnet and reject new sessions
+at global capacity instead of evicting another user's active session. Configure
+`new SessionStore(maxSize, ttlMs, maxPerSubnet)` as needed for shared networks.
 State is process-local and resets on restart; multiple processes need coordinated
 routing or a shared enforcement layer. Shared subnets may challenge legitimate users.
+
+Static client sources are read and preprocessed once per module lifetime; hot
+collector compilation performs no filesystem reads. Restart the service after
+changing source templates. Root, `client/`, and `pow/` workers use the same
+scratchpad protocol; `pow/verifier.js` re-exports the canonical verifier.
+
+## Origin binding
+
+The HTTP server accepts same-origin requests by default. Additional origins must
+be explicitly configured with `createServer({allowedOrigins: [...]})` or the
+comma-separated `ALLOWED_ORIGINS` environment variable. Wildcards, opaque/null
+origins, and cross-site requests without Origin are rejected. Accepted CORS
+responses echo the validated origin and include `Vary: Origin`.
+
+Session profiles and challenge signatures bind both the initiating origin and
+service host. Initial and step-up origin/host changes are rejected. Signed tokens
+include `origin` and `host` claims; standalone verification of bound tokens must
+pass both expected values to `verifyToken`. HTTP verification and middleware derive
+them from the request automatically. Low-level legacy issuance without origin/host
+remains available for existing integrations, but such tokens fail the HTTP
+origin/host checks. Cross-origin collector loads must use CORS mode so their
+Origin header is present consistently on collection and submission.
+
+Host scheme is inferred from the actual socket, not forwarded headers. If TLS
+terminates at a reverse proxy, configure the external page origin explicitly and
+ensure Host is preserved consistently. Configure the edge to reject unexpected
+hosts. Origin checks constrain browser cross-site use; raw HTTP clients can forge
+these headers, and trusted-origin XSS or cooperative clients can still farm tokens.
 
 ## Signing keys
 

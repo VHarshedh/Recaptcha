@@ -17,11 +17,14 @@
   let size = 0, cursor = 0, running = false, segment = 0;
   let lastPoint = null, touchID = null, lastTouch = -Infinity, lastDown = null, lastUp = null, lastCode = null;
   let counts;
+  let artifacts, previousMove;
   const listeners = [];
   const now = () => root.performance.now();
   const clamp = v => Math.max(0, Math.min(1, v));
   const squash = v => v / (1 + Math.abs(v));
   function reset() {
+    artifacts = { moveSamples: 0, screenSamples: 0, zeroScreen: 0, displacementSamples: 0, zeroMovement: 0, timestampSamples: 0, duplicateTimestamp: 0 };
+    previousMove = null;
     buffer.fill(undefined); size = cursor = segment = 0;
     activeKeys.clear(); lastPoint = null; touchID = null;
     lastDown = lastUp = lastCode = null; lastTouch = -Infinity;
@@ -57,6 +60,21 @@
   }
   function mouse(event) {
     if (!trusted(event)) return;
+    artifacts.moveSamples++;
+    if (!root.document?.fullscreenElement && [event.screenX, event.screenY, event.clientX, event.clientY].every(Number.isFinite)) {
+      artifacts.screenSamples++;
+      if (event.screenX === event.clientX && event.screenY === event.clientY) artifacts.zeroScreen++;
+    }
+    if (previousMove && (previousMove.x !== event.clientX || previousMove.y !== event.clientY) &&
+        Number.isFinite(event.movementX) && Number.isFinite(event.movementY)) {
+      artifacts.displacementSamples++;
+      if (event.movementX === 0 && event.movementY === 0) artifacts.zeroMovement++;
+    }
+    if (previousMove && Number.isFinite(event.timeStamp) && Number.isFinite(previousMove.stamp)) {
+      artifacts.timestampSamples++;
+      if (event.timeStamp <= previousMove.stamp) artifacts.duplicateTimestamp++;
+    }
+    previousMove = { x: event.clientX, y: event.clientY, stamp: event.timeStamp };
     const t = now();
     // Suppress compatibility mouse events immediately following touch input.
     if (t - lastTouch < 800 || event.sourceCapabilities && event.sourceCapabilities.firesTouchEvents) return;
@@ -262,6 +280,11 @@
     }
     return { version: 1, running, historyCount: size, historyCapacity: CAPACITY,
       eventCounts: { ...counts }, mouse, touch, typing, flags,
+      pointerArtifacts: { moveSamples: artifacts.moveSamples, screenSamples: artifacts.screenSamples,
+        displacementSamples: artifacts.displacementSamples,
+        zeroScreenDeltaRatio: artifacts.screenSamples ? artifacts.zeroScreen / artifacts.screenSamples : 0,
+        zeroMovementRatio: artifacts.displacementSamples ? artifacts.zeroMovement / artifacts.displacementSamples : 0,
+        duplicateTimestampRatio: artifacts.timestampSamples ? artifacts.duplicateTimestamp / artifacts.timestampSamples : 0 },
       normalization: 'Motion magnitudes: viewport-diagonal/s^n, mapped by x/(1+x). Angles: radians/pi. Entropy: Shannon/log2(12). Timing: x=ms/250, mapped by x/(1+abs(x)). Population variances.',
       interpretation: 'Descriptive features only; trusted events, smoothness, and frequency-band energy do not prove human or bot origin.' };
   }

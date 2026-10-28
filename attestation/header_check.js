@@ -1,11 +1,13 @@
 "use strict";
 
+const { requestOrigin, requestHostOrigin } = require("./origin");
 const { getClientIP } = require("./ip_mask");
 
 function extractHeaderProfile(req) {
   const h = req.headers || {};
   const read = name => typeof h[name] === "string" ? h[name] : "";
   return {
+    origin: requestOrigin(req), host: requestHostOrigin(req),
     ua: read("user-agent"), acceptLanguage: read("accept-language"),
     secChUa: read("sec-ch-ua"), secChUaMobile: read("sec-ch-ua-mobile"),
     secChUaPlatform: read("sec-ch-ua-platform"),
@@ -21,7 +23,7 @@ function verifyHeaderConsistency(initial, current, telemetry) {
   const note = (code, weight) => { anomalies.push(code); penalty += weight; };
   if (!initial) note("missing_initial_header_profile", 1);
   else {
-    for (const field of ["ua", "acceptLanguage", "secChUa", "secChUaMobile", "secChUaPlatform", "clientIP"]) {
+    for (const field of ["origin", "host", "ua", "acceptLanguage", "secChUa", "secChUaMobile", "secChUaPlatform", "clientIP"]) {
       if (initial[field] !== current[field]) note(field + "_changed_mid_session", 0.6);
     }
   }

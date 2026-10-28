@@ -22,50 +22,7 @@
 /* ------------------------------------------------------------------ */
 
 // prettier-ignore
-const WORKER_SOURCE = `
-"use strict";
-const encoder = new TextEncoder();
-function countLeadingZeroBits(bytes) {
-  let bits = 0;
-  for (let i = 0; i < bytes.length; i++) {
-    if (bytes[i] === 0) { bits += 8; }
-    else { bits += Math.clz32(bytes[i]) - 24; break; }
-  }
-  return bits;
-}
-function bytesToHex(buf) {
-  const L = "0123456789abcdef";
-  let h = "";
-  for (let i = 0; i < buf.length; i++) h += L[buf[i] >> 4] + L[buf[i] & 0x0f];
-  return h;
-}
-async function mine(challenge, difficulty) {
-  if (typeof challenge !== "string" || !challenge) throw new Error("challenge must be a non-empty string");
-  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 256) throw new Error("difficulty must be in [1,256]");
-  const t0 = performance.now();
-  const cb = encoder.encode(challenge);
-  const maxNL = 20;
-  const buf = new Uint8Array(cb.length + maxNL);
-  buf.set(cb, 0);
-  const BATCH = 50000;
-  let nonce = 0;
-  while (true) {
-    const ns = String(nonce), nl = ns.length;
-    for (let j = 0; j < nl; j++) buf[cb.length + j] = ns.charCodeAt(j);
-    const d = await crypto.subtle.digest("SHA-256", buf.subarray(0, cb.length + nl));
-    const hb = new Uint8Array(d);
-    if (countLeadingZeroBits(hb) >= difficulty) {
-      return { nonce, hash: bytesToHex(hb), durationMs: Math.round(performance.now() - t0) };
-    }
-    nonce++;
-    if (nonce % BATCH === 0) self.postMessage({ type:"progress", nonce, elapsedMs: Math.round(performance.now() - t0) });
-  }
-}
-self.addEventListener("message", async (e) => {
-  try { const r = await mine(e.data.challenge, e.data.difficulty); self.postMessage({ type:"result", ...r }); }
-  catch (err) { self.postMessage({ type:"error", message: err.message }); }
-});
-`;
+const WORKER_SOURCE = "/**\n * pow_worker.js — Proof-of-Work Web Worker\n *\n * Protocol:\n *   IN  → { challenge: string, difficulty: number }\n *         difficulty = number of leading zero BITS required in the SHA-256 hash\n *   OUT ← { nonce: number, hash: string, durationMs: number }\n *\n * Uses crypto.subtle.digest with pre-allocated ArrayBuffers for throughput.\n * Reports progress every ~50 000 iterations so the orchestrator can show UI\n * feedback if desired.\n */\n\n\"use strict\";\n\n/* ------------------------------------------------------------------ */\n/*  Helpers                                                            */\n/* ------------------------------------------------------------------ */\n\n/**\n * Convert a hex string to its leading-zero-bit count.\n * Operates on the raw bytes (2 hex chars = 1 byte = 8 bits) so we\n * never pay for BigInt or bit-string conversion.\n *\n * @param {Uint8Array} bytes  – the 32-byte SHA-256 digest\n * @returns {number}          – count of leading zero bits\n */\nfunction countLeadingZeroBits(bytes) {\n  let bits = 0;\n  for (let i = 0; i < bytes.length; i++) {\n    if (bytes[i] === 0) {\n      bits += 8;\n    } else {\n      // Math.clz32 counts from bit-31; subtract 24 because we have an 8-bit value.\n      bits += Math.clz32(bytes[i]) - 24;\n      break;\n    }\n  }\n  return bits;\n}\n\n/**\n * Encode a string into a Uint8Array (UTF-8).  We avoid TextEncoder\n * instantiation inside the hot loop by keeping a module-level encoder.\n */\nfunction createScratchpad(challenge) {\n  var pad = new Int32Array(16384), seed = 2166136261;\n  for (var i = 0; i < challenge.length; i++) seed = Math.imul(seed ^ challenge.charCodeAt(i), 16777619);\n  for (var j = 0; j < pad.length; j++) {\n    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;\n    seed = (seed + Math.imul(j + 1, 0x9e3779b9)) | 0; pad[j] = seed;\n  }\n  return pad;\n}\nfunction scratchSuffix(pad, nonce) {\n  var x = (nonce | 0) ^ Math.floor(nonce / 4294967296), y = 0x6a09e667;\n  for (var i = 0; i < 64; i++) {\n    x = Math.imul(x ^ pad[(x ^ y) & 16383], 0x85ebca6b);\n    x = (x << 13) | (x >>> 19);\n    y = (Math.imul(y ^ x, 0xc2b2ae35) + i) | 0;\n  }\n  return \":cache64-v1:\" + (x >>> 0) + \":\" + (y >>> 0);\n}\nconst encoder = new TextEncoder();\n\n/**\n * Convert a Uint8Array to a lowercase hex string.\n * @param {Uint8Array} buf\n * @returns {string}\n */\nfunction bytesToHex(buf) {\n  // Pre-built lookup is ~3× faster than .toString(16) in a loop.\n  const LUT = \"0123456789abcdef\";\n  let hex = \"\";\n  for (let i = 0; i < buf.length; i++) {\n    hex += LUT[buf[i] >> 4] + LUT[buf[i] & 0x0f];\n  }\n  return hex;\n}\n\n/* ------------------------------------------------------------------ */\n/*  Main mining loop                                                   */\n/* ------------------------------------------------------------------ */\n\n/**\n * Mine a nonce such that SHA-256(challenge || nonce) has at least\n * `difficulty` leading zero bits.\n *\n * @param {string} challenge\n * @param {number} difficulty\n */\nasync function mine(challenge, difficulty) {\n  if (typeof challenge !== \"string\" || !challenge) {\n    throw new Error(\"challenge must be a non-empty string\");\n  }\n  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 256) {\n    throw new Error(\"difficulty must be an integer in [1, 256]\");\n  }\n\n  const t0 = performance.now();\n\n  // Pre-encode the static challenge prefix once.\n  const challengeBytes = encoder.encode(challenge);\n\n  // We construct the message buffer as:  challengeBytes + ASCII(nonce)\n  // Because nonce length varies, we rebuild the tail each iteration.\n  // To minimise allocations we reuse a shared buffer large enough for\n  // challenge + up to 20 digits of nonce (2^64 has 20 decimal digits).\n  const maxNonceLen = 80;\n  const pad = createScratchpad(challenge);\n  const buf = new Uint8Array(challengeBytes.length + maxNonceLen);\n  buf.set(challengeBytes, 0);\n\n  const BATCH = 50_000; // iterations between progress reports\n  let nonce = 0;\n\n  while (true) {\n    // Encode nonce suffix directly into buf to avoid per-iteration allocs.\n    const nonceStr = String(nonce) + scratchSuffix(pad, nonce);\n    const nonceLen = nonceStr.length;\n    for (let j = 0; j < nonceLen; j++) {\n      buf[challengeBytes.length + j] = nonceStr.charCodeAt(j);\n    }\n    const messageSlice = buf.subarray(0, challengeBytes.length + nonceLen);\n\n    // Compute SHA-256 via SubtleCrypto (hardware-accelerated where available).\n    const digest = await crypto.subtle.digest(\"SHA-256\", messageSlice);\n    const hashBytes = new Uint8Array(digest);\n\n    if (countLeadingZeroBits(hashBytes) >= difficulty) {\n      const durationMs = Math.round(performance.now() - t0);\n      return {\n        nonce,\n        hash: bytesToHex(hashBytes),\n        durationMs,\n      };\n    }\n\n    nonce++;\n\n    // Periodic progress heartbeat.\n    if (nonce % BATCH === 0) {\n      self.postMessage({\n        type: \"progress\",\n        nonce,\n        elapsedMs: Math.round(performance.now() - t0),\n      });\n    }\n  }\n}\n\n/* ------------------------------------------------------------------ */\n/*  Message handler                                                    */\n/* ------------------------------------------------------------------ */\n\nself.addEventListener(\"message\", async (evt) => {\n  const { challenge, difficulty } = evt.data;\n  try {\n    const result = await mine(challenge, difficulty);\n    self.postMessage({ type: \"result\", ...result });\n  } catch (err) {\n    self.postMessage({ type: \"error\", message: err.message });\n  }\n});\n";
 
 /* ------------------------------------------------------------------ */
 /*  Worker factory                                                     */

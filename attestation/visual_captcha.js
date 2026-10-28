@@ -27,45 +27,63 @@ function answerHash(secret, answer, challengeId) {
 }
 
 function renderAnswer(answer) {
-  const palette = ["#334155", "#475569", "#536479"];
-  const paths = [];
-  // Signal and clutter use the same generator, palette, size distribution and schema.
-  function blob(point, x, y, layer) {
-    const w = random(2.3, 2.9), h = random(4.5, 5.5), bend = random(-0.5, 0.5);
-    paths.push({ d: `M${point(x, y)}C${point(x + w, y + bend)} ${point(x + w, y + h / 2)} ${point(x + w, y + h)}C${point(x, y + h - bend)} ${point(x, y + h / 2)} ${point(x, y)}Z`,
-      color: palette[crypto.randomInt(palette.length)], layer });
-  }
+  const palette = ["#334155", "#475569", "#536479"], paths = [];
+  const layerOffsets = Array.from({ length: 3 }, (_, layer) => [random(-80, 80) + layer * 55, random(-55, 55)]);
   const phase = random(0, Math.PI * 2);
-  for (let i = 0; i < answer.length; i++) {
-    const angle = random(-28, 28) * Math.PI / 180;
-    const shear = random(-0.14, 0.14), scale = random(0.9, 1.08), wave = random(0.8, 2.3);
-    const point = (x, y) => {
+  function transform(cx, cy) {
+    const angle = random(-28, 28) * Math.PI / 180, shear = random(-0.14, 0.14);
+    const scale = random(0.9, 1.08), wave = random(0.8, 2.3);
+    return (x, y) => {
       x = (x - 12.5) * scale + shear * y + wave * Math.sin(y / 8 + phase);
       y -= 17.5;
-      return [(35 + i * 45 + x * Math.cos(angle) - y * Math.sin(angle)).toFixed(2),
-        (58 + 8 * Math.sin(i + phase) + x * Math.sin(angle) + y * Math.cos(angle)).toFixed(2)].join(" ");
+      return [cx + x * Math.cos(angle) - y * Math.sin(angle), cy + x * Math.sin(angle) + y * Math.cos(angle)];
     };
+  }
+  function blob(point, x, y, layer, phaseOffset = 0) {
+    const w = random(2.3, 2.9), h = random(4.5, 5.5), bend = random(-0.5, 0.5);
+    const p = (a, b) => {
+      const v = point(a, b);
+      return (v[0] - layerOffsets[layer][0] + phaseOffset).toFixed(2) + " " +
+        (v[1] - layerOffsets[layer][1] - phaseOffset).toFixed(2);
+    };
+    paths.push({ d: "M" + p(x,y) + "C" + p(x+w,y+bend) + " " + p(x+w,y+h/2) + " " + p(x+w,y+h) +
+      "C" + p(x,y+h-bend) + " " + p(x,y+h/2) + " " + p(x,y) + "Z",
+      color: palette[crypto.randomInt(palette.length)], layer });
+  }
+  function cluster(cells, cx, cy) {
+    const point = transform(cx, cy);
     let shard = crypto.randomInt(3);
-    FONT[answer[i]].split("/").forEach((row, y) => {
-      [...row].forEach((pixel, x) => {
-        if (pixel !== "1") return;
-        blob(point, x * 5, y * 5, shard++ % 3);
-        blob(point, x * 5 + 2.5, y * 5, shard++ % 3);
-      });
-    });
+    for (const [x, y] of cells) {
+      const layer = shard++ % 3;
+      blob(point, x*5, y*5, layer);
+      blob(point, x*5+2.5, y*5, (layer+1)%3);
+      // Complementary twins share the same local bounding region and palette.
+      if (crypto.randomInt(4) === 0) {
+        blob(point, x*5, y*5, (layer+2)%3, 0.65);
+        blob(point, x*5+2.5, y*5, layer, -0.65);
+      }
+    }
   }
-  const curveCount = crypto.randomInt(180, 241);
-  for (let i = 0; i < curveCount; i++) {
-    const angle = random(-0.5, 0.5), x = random(10, 300), y = random(25, 90);
-    const point = (a, b) => `${(x + a * Math.cos(angle) - b * Math.sin(angle)).toFixed(2)} ${(y + a * Math.sin(angle) + b * Math.cos(angle)).toFixed(2)}`;
-    blob(point, 0, 0, i % 3);
+  for (let i = 0; i < answer.length; i++) {
+    const cells = [];
+    FONT[answer[i]].split("/").forEach((row,y) => [...row].forEach((pixel,x) => { if (pixel === "1") cells.push([x,y]); }));
+    cluster(cells, 35+i*45, 58+8*Math.sin(i+phase));
   }
-  // Shuffle paths so no semantic character grouping/order is transmitted.
+  // Connected pseudo-glyphs use the same paired density and affine generator.
+  for (let i = 0; i < 8; i++) {
+    const cells = new Map(); let x = crypto.randomInt(5), y = crypto.randomInt(7);
+    for (let step = 0; step < 45; step++) {
+      cells.set(x+":"+y, [x,y]);
+      const axis = crypto.randomInt(2), delta = crypto.randomInt(2) ? 1 : -1;
+      if (axis) x = Math.max(0,Math.min(4,x+delta)); else y = Math.max(0,Math.min(6,y+delta));
+    }
+    cluster([...cells.values()], 18+(i%7)*43, i%2 ? 85 : 30);
+  }
   for (let i = paths.length - 1; i > 0; i--) {
     const j = crypto.randomInt(i + 1); [paths[i], paths[j]] = [paths[j], paths[i]];
   }
   return { width: 310, height: 120, background: "#f1f5f9", palette, paths,
-    noise: { fps: 60, particles: 300, seed: crypto.randomBytes(4).readUInt32BE(), opacity: 0.32 } };
+    noise: { layerOffsets, fps: 60, particles: 300, seed: crypto.randomBytes(4).readUInt32BE(), opacity: 0.32 } };
 }
 
 function generateVisual(secret, challengeId) {

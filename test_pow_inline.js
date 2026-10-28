@@ -27,6 +27,17 @@ async function main() {
   const challenge = generateChallenge();
   const solution = await context.solvePoW({ challenge: challenge.challenge, difficulty: 8 });
   assert(verifyPoW({ ...challenge, difficulty: 8, nonce: solution.nonce }).valid);
+  const packaged = require("./pow");
+  assert.equal(packaged.verifyPoW, verifyPoW);
+  assert(packaged.verifyPoW({ ...challenge, difficulty: 8, nonce: solution.nonce }).valid);
+  assert.equal(packaged.WORKER_SOURCE, fs.readFileSync("pow_worker.js", "utf8"));
+  assert.equal(fs.readFileSync("pow/inline.js", "utf8"), fs.readFileSync("pow_inline.js", "utf8"));
+  assert.equal(fs.readFileSync("pow/worker.js", "utf8"), fs.readFileSync("pow_worker.js", "utf8"));
+  // Find a SHA-only nonce that explicitly fails the hardened protocol.
+  let legacyNonce = 0;
+  while (crypto.createHash("sha256").update(challenge.challenge + legacyNonce).digest()[0] !== 0 ||
+      hashPoW(challenge.challenge, legacyNonce)[0] === 0) legacyNonce++;
+  assert(!packaged.verifyPoW({ ...challenge, difficulty: 8, nonce: legacyNonce }).valid);
   assert.equal(revoked, 1); assert.equal(terminated, 1);
   const hashing = vm.createContext({ TextEncoder, performance, self: { addEventListener() {} } });
   vm.runInContext(source, hashing);

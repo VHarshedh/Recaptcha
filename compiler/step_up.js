@@ -47,10 +47,36 @@ function openVisualChallenge(instructions, ttl) {
   var frameTimer, expiryTimer, rejectAnswer, finished = false;
   var openedAt = performance["now"](), firstKey = null, lastKey = null, lastUp = null;
   var down = {}, dwells = [], intervals = [], trustedKeydowns = 0, untrustedCount = 0, pointerCount = 0;
+  var screenSamples = 0, displacementSamples = 0, zeroScreen = 0, zeroMovement = 0, previousMove = null;
+  var timestampSamples = 0, duplicateTimestamps = 0;
+  var trustedPointerdowns = 0, trustedFocusChanges = 0, pointerBeforeTyping = false, focusBeforeTyping = false, focusIntent = -Infinity;
   function track(event) {
     if (finished) return;
     if (!event["isTrusted"]) { untrustedCount++; return; }
     var now = performance["now"](), type = event["type"], key = event["code"] || event["key"];
+    if (type === "keydown" && event["key"] === "Tab") focusIntent = now;
+    if (type === "pointerdown") {
+      trustedPointerdowns++; focusIntent = now;
+      if (event["target"] === input && firstKey === null) pointerBeforeTyping = true;
+    }
+    if (type === "focusin" && event["target"] === input && now - focusIntent < 1000) {
+      trustedFocusChanges++; if (firstKey === null) focusBeforeTyping = true;
+    }
+    if (type === "pointermove" || type === "mousemove") {
+      if (!document["fullscreenElement"] && [event["screenX"], event["screenY"], event["clientX"], event["clientY"]]["every"](Number["isFinite"])) {
+        screenSamples++;
+        if (event["screenX"] === event["clientX"] && event["screenY"] === event["clientY"]) zeroScreen++;
+      }
+      if (previousMove && (previousMove[0] !== event["clientX"] || previousMove[1] !== event["clientY"]) &&
+          Number["isFinite"](event["movementX"]) && Number["isFinite"](event["movementY"])) {
+        displacementSamples++;
+        if (event["movementX"] === 0 && event["movementY"] === 0) zeroMovement++;
+      }
+      if (previousMove && Number["isFinite"](event["timeStamp"]) && Number["isFinite"](previousMove[2])) {
+        timestampSamples++; if (event["timeStamp"] <= previousMove[2]) duplicateTimestamps++;
+      }
+      previousMove = [event["clientX"], event["clientY"], event["timeStamp"]];
+    }
     if (type === "keydown" && event["target"] === input && !event["repeat"] && event["key"]["length"] === 1) {
       if (firstKey === null) firstKey = now;
       if (lastKey !== null) intervals["push"](now - lastKey);
@@ -59,7 +85,7 @@ function openVisualChallenge(instructions, ttl) {
       dwells["push"](now - down[key]); delete down[key]; lastUp = now;
     } else if (type === "pointermove" || type === "mousemove" || type === "pointerdown") pointerCount++;
   }
-  var eventTypes = ["keydown", "keyup", "pointermove", "mousemove", "pointerdown"];
+  var eventTypes = ["keydown", "keyup", typeof window["PointerEvent"] === "function" ? "pointermove" : "mousemove", "pointerdown", "focusin"];
   eventTypes["forEach"](function(type) { shadow["addEventListener"](type, track, true); });
   function variance(values) {
     if (values["length"] < 2) return 0;
@@ -68,6 +94,12 @@ function openVisualChallenge(instructions, ttl) {
   }
   function telemetry() {
     return { "untrustedCount": untrustedCount, "trustedKeydowns": trustedKeydowns, "pointerCount": pointerCount,
+      "trustedPointerdowns": trustedPointerdowns, "trustedFocusChanges": trustedFocusChanges,
+      "pointerBeforeTyping": pointerBeforeTyping, "focusBeforeTyping": focusBeforeTyping,
+      "screenSamples": screenSamples, "displacementSamples": displacementSamples,
+      "zeroScreenDeltaRatio": screenSamples ? zeroScreen / screenSamples : 0,
+      "zeroMovementRatio": displacementSamples ? zeroMovement / displacementSamples : 0,
+      "duplicateTimestampRatio": timestampSamples ? duplicateTimestamps / timestampSamples : 0,
       "dwellCount": dwells["length"], "ttfkMs": firstKey === null ? 0 : firstKey - openedAt,
       "totalTypingMs": firstKey === null || lastUp === null ? 0 : lastUp - firstKey,
       "dwellVariance": variance(dwells), "intervalVariance": variance(intervals) };
@@ -86,7 +118,8 @@ function openVisualChallenge(instructions, ttl) {
     shapes["forEach"](function(shape) {
       if (shape["style"]["layer"] !== layer) return;
       ctx["fillStyle"] = shape["style"]["color"];
-      ctx["save"](); ctx["translate"]((randomNoise() - 0.5) * 0.8, (randomNoise() - 0.5) * 0.8);
+      var offset = instructions["noise"]["layerOffsets"][layer];
+      ctx["save"](); ctx["translate"](offset[0] + (randomNoise() - 0.5) * 0.8, offset[1] + (randomNoise() - 0.5) * 0.8);
       ctx["fill"](shape["path"]); ctx["restore"]();
     });
     layer = (layer + 1) % 3;

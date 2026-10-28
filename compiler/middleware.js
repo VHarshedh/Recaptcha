@@ -22,6 +22,7 @@ const http = require("node:http");
 const { compile } = require("./pipeline");
 const { decryptTelemetry } = require("./ecdh_session");
 const { generateChallenge, verifyPoW } = require("../pow_verifier");
+const { maskIP, getClientIP } = require("../attestation/ip_mask");
 
 /* ------------------------------------------------------------------ */
 /*  ECDH session store (in-memory, keyed by session ID)                */
@@ -32,31 +33,52 @@ class SessionStore {
    * @param {number} maxSize — maximum stored sessions
    * @param {number} ttlMs  — session lifetime in ms
    */
-  constructor(maxSize = 10_000, ttlMs = 300_000) {
+  constructor(maxSize = 10_000, ttlMs = 300_000, maxPerSubnet = 15) {
+    for (const value of [maxSize, ttlMs, maxPerSubnet])
+      if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("invalid session store limit");
     this._map     = new Map();
     this._maxSize = maxSize;
     this._ttlMs   = ttlMs;
+    this._maxPerSubnet = maxPerSubnet;
+    this._subnets = new Map();
+  }
+  remove(id) {
+    const entry = this._map.get(id); if (!entry) return;
+    const count = this._subnets.get(entry.ipSubnet) - 1;
+    if (count) this._subnets.set(entry.ipSubnet, count); else this._subnets.delete(entry.ipSubnet);
+    this._map.delete(id);
+  }
+  prune() {
+    for (const [id, entry] of this._map) {
+      if (Date.now() - entry.createdAt < this._ttlMs) break;
+      this.remove(id);
+    }
+  }
+  canAccept(subnet) {
+    this.prune();
+    return this._map.size < this._maxSize && (this._subnets.get(subnet) || 0) < this._maxPerSubnet;
   }
 
   /** Store a session's ECDH key pair and PoW challenge. */
   set(sessionId, data) {
-    // Evict oldest if at capacity.
-    if (this._map.size >= this._maxSize) {
-      const oldest = this._map.keys().next().value;
-      this._map.delete(oldest);
-    }
     const entry = (data && data.keyPair) ? data : { keyPair: data };
+    const ipSubnet = entry.ipSubnet || maskIP(entry.headerProfile?.clientIP);
+    this.remove(sessionId);
+    if (!this.canAccept(ipSubnet)) return false;
     this._map.set(sessionId, {
       ...entry,
+      ipSubnet,
       createdAt: Date.now(),
     });
+    this._subnets.set(ipSubnet, (this._subnets.get(ipSubnet) || 0) + 1);
+    return true;
   }
 
   /** Retrieve and consume a session (one-time use). */
   consume(sessionId) {
     const entry = this._map.get(sessionId);
     if (!entry) return null;
-    this._map.delete(sessionId);
+    this.remove(sessionId);
     if (Date.now() - entry.createdAt >= this._ttlMs) return null;
     if (entry.keyPair) {
       return Object.assign(Object.create(entry.keyPair), entry);
@@ -90,6 +112,9 @@ function createMiddleware(opts = {}) {
 
   function handler(req, res, next) {
     try {
+      if (!sessionStore.canAccept(maskIP(getClientIP(req)))) {
+        res.writeHead(429, { "Retry-After": "60" }); return res.end("Session capacity reached");
+      }
       const { challenge, issuedAt } = generateChallenge();
       const difficulty = 16;
 
@@ -193,6 +218,12 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
       }
 
       const keyPair = session.keyPair || session;
+      const currentProfile = extractHeaderProfile(req);
+      if (session.headerProfile && ["origin", "host"].some(field =>
+          session.headerProfile[field] !== currentProfile[field])) {
+        onFailure(req); res.writeHead(403, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "Session origin mismatch" }));
+      }
       const plaintext = decryptTelemetry(body, keyPair.privateKey, session.expectedVmState);
 
       // Cryptographically verify PoW challenge server-side

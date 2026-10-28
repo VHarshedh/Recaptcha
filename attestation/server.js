@@ -15,6 +15,7 @@
 "use strict";
 
 const http = require("node:http");
+const { normalizeOrigin, requestHostOrigin, requestOrigin } = require("./origin");
 const { RateLimiter } = require("./rate_limiter");
 const { AdaptiveChallenge } = require("./adaptive_challenge");
 const { verifyToken } = require("./verifier");
@@ -24,7 +25,8 @@ const { createMiddleware, createDecryptHandler, SessionStore } = require("../com
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
 
-function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), rateLimit = {}, rateLimiter = new RateLimiter(rateLimit) } = {}) {
+function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()) : [], rateLimit = {}, rateLimiter = new RateLimiter(rateLimit) } = {}) {
+const origins = new Set(allowedOrigins.map(value => { const origin = normalizeOrigin(value); if (!origin) throw new Error("invalid allowed origin"); return origin; }));
 const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessionStore });
 
 /* ------------------------------------------------------------------ */
@@ -82,7 +84,7 @@ function handleVerify(req, res) {
   return readBody(req)
     .then((raw) => {
       const { token, action, minScore } = JSON.parse(raw.toString("utf-8"));
-      const result = verifyToken(token, { clientIP: getClientIP(req), action, minScore });
+      const result = verifyToken(token, { clientIP: getClientIP(req), action, minScore, origin: requestOrigin(req), host: requestHostOrigin(req) });
       return json(res, result.valid ? 200 : 403, result);
     })
     .catch((err) => json(res, 400, { error: err.message }));
@@ -105,8 +107,12 @@ function handleHealth(_req, res) {
 /* ------------------------------------------------------------------ */
 
 const server = http.createServer(async (req, res) => {
-  // CORS (permissive for dev — tighten in production).
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = requestOrigin(req), host = requestHostOrigin(req);
+  const crossSiteWithoutOrigin = req.headers.origin === undefined && req.headers["sec-fetch-site"] === "cross-site";
+  if (!host || !origin || crossSiteWithoutOrigin || (origin !== host && !origins.has(origin)))
+    return json(res, 403, { error: "Origin not allowed" });
+  res.setHeader("Vary", "Origin");
+  if (req.headers.origin !== undefined) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Attestation-Token");
 

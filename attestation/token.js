@@ -18,6 +18,7 @@
 
 const crypto = require("node:crypto");
 const { privateKey } = require("./keys");
+const { normalizeOrigin } = require("./origin");
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -46,7 +47,9 @@ const DEFAULT_TTL_S = 45;
  *
  * @returns {{ token: string, claims: Object }}
  */
-function issueToken({ score, action, ipSubnet, ttlS, nowMs }) {
+function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = "" }) {
+  for (const value of [origin, host])
+    if (typeof value !== "string" || (value !== "" && normalizeOrigin(value) !== value)) throw new TypeError("invalid token origin/host");
   // ── Validate score ────────────────────────────────────────────────
   if (typeof score !== "number" || !Number.isFinite(score)) {
     throw new TypeError("score must be a finite number");
@@ -73,6 +76,8 @@ function issueToken({ score, action, ipSubnet, ttlS, nowMs }) {
   // ── Build claims ──────────────────────────────────────────────────
   const claims = {
     score,
+    origin,
+    host,
     action,
     exp,
     iat: now,

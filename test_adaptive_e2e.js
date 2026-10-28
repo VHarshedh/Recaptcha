@@ -56,12 +56,13 @@ async function main() {
     answerHash: answerHash(key, "ABC234", id), instructions: renderAnswer("ABC234"),
   }) });
   const rateLimiter = new RateLimiter({ maxRequests: 1000, failureLimit: 1000 });
-  const server = createServer({ sessionStore: sessions, adaptive, rateLimiter });
+  const server = createServer({ sessionStore: sessions, adaptive, rateLimiter, allowedOrigins: ["https://other.example"] });
   // Native synchronous mining blocks this test process; avoid stale keep-alive
   // sockets while mining. Production mining runs in the browser worker.
   server.keepAliveTimeout = 120_000;
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
+  requestProfile.origin = origin; requestProfile.host = origin;
   async function post(path, body, extra = {}) {
     const res = await fetch(origin + path, { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
     return { status: res.status, data: await res.json() };
@@ -84,11 +85,11 @@ async function main() {
   }
   function submission(result, solution, answer = "") {
     return { sessionId: result.sessionId, challengeId: result.challengeId, challengeToken: result.challengeToken,
-      answer, powSolution: solution, modalKinematics: { untrustedCount: 0, trustedKeydowns: 6, dwellCount: 6, ttfkMs: 400, totalTypingMs: 800, dwellVariance: 10, intervalVariance: 20 } };
+      answer, powSolution: solution, modalKinematics: { trustedPointerdowns: 1, trustedFocusChanges: 0, pointerBeforeTyping: true, focusBeforeTyping: false, screenSamples: 0, displacementSamples: 0, zeroScreenDeltaRatio: 0, zeroMovementRatio: 0, untrustedCount: 0, trustedKeydowns: 6, dwellCount: 6, ttfkMs: 400, totalTypingMs: 800, dwellVariance: 10, intervalVariance: 20 } };
   }
   function checkToken(result) {
     assert.equal(result.status, "passed");
-    const verified = verifyToken(result.token, { clientIP: "127.0.0.1", action: "login", minScore: 0.70 });
+    const verified = verifyToken(result.token, { clientIP: "127.0.0.1", action: "login", minScore: 0.70, origin, host: origin });
     assert(verified.valid, verified.reason);
   }
   try {
@@ -141,7 +142,7 @@ async function main() {
     console.log("Encrypted visual rendering, wrong answer, correct answer, and single-attempt checks passed");
 
     // Server-owned expiry, signature, nonce and request context must not be replaceable.
-    for (const attack of ["expired", "signature", "nonce", "header", "session", "ciphertext"]) {
+    for (const attack of ["expired", "signature", "nonce", "header", "session", "ciphertext", "origin", "host"]) {
       fx = fixture(); const challenge = (await fx.assess(passive)).data;
       const data = submission(challenge, { nonce: -1 });
       if (attack === "expired") challenges._map.get(fx.sid).claims.expiresAt = Date.now() - 1;
@@ -149,7 +150,9 @@ async function main() {
       if (attack === "session") data.sessionId = "wrong";
       const wire = fx.encrypt(data);
       if (attack === "ciphertext") wire.ct = Buffer.alloc(20).toString("base64");
-      const result = await post("/attest/verify-challenge", wire, attack === "header" ? { "accept-language": "fr" } : {});
+      const extra = attack === "header" ? { "accept-language": "fr" } : attack === "origin" ? { origin: "https://other.example" } :
+        attack === "host" ? { host: "other.example" } : {};
+      const result = await post("/attest/verify-challenge", wire, extra);
       assert.equal(result.status, 403, attack);
       assert.equal(challenges.consume(fx.sid), null, "failed attempt must be consumed");
     }
@@ -157,6 +160,7 @@ async function main() {
       fx = fixture(); const low = (await fx.assess(human(), spoof)).data;
       assert.equal(low.status, "step_up_visual"); assert(low.score <= 0.1);
     }
+    assert.equal((await fixture().assess(human(), { origin: "https://other.example" })).status, 403);
     const firefox = { ...requestProfile, ua: "Firefox/130", secChUa: "", secChUaPlatform: "", secChUaMobile: "" };
     assert(verifyHeaderConsistency(firefox, firefox, { ...human(), hardware: { profile: { userAgent: firefox.ua } } }).penalty >= 0.5);
     console.log("Expiry, signature, bad-work, header spoofing, and session-binding checks passed");
@@ -207,11 +211,12 @@ async function main() {
           if (tag === "input") queueMicrotask(() => {
             const shadow = elements.find(e => e.tag === "shadow");
             clock += 300;
+            shadow.events.pointerdown({ type: "pointerdown", target: node, isTrusted: true });
             for (let i = 0; i < 6; i++) {
               shadow.events.keydown({ type: "keydown", target: node, isTrusted: true, key: "a", code: "KeyA" });
-              clock += 45 + i * 3;
+              clock += [62, 104, 71, 93, 55, 121][i];
               shadow.events.keyup({ type: "keyup", target: node, isTrusted: true, key: "a", code: "KeyA" });
-              clock += 80 + i;
+              clock += [81, 133, 74, 97, 128, 69][i];
             }
             elements.find(e => e.tag === "form").events.submit({ preventDefault() {} });
           });

@@ -11,6 +11,7 @@ const verifier = require("./verifier");
 const client = require("./client");
 
 module.exports = {
+  ...verifier,
   // Server-side verification
   generateChallenge: verifier.generateChallenge,
   verifyPoW: verifier.verifyPoW,

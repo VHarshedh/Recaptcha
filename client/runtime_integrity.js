@@ -273,9 +273,21 @@
           note('automation-globals', 0.3, 'Automation-associated global name: ' + key);
       }
     });
+    // Serialization also occurs with ordinary DevTools. Report a raw observation,
+    // never classify CDP or penalize a user solely for opening developer tools.
+    const serialization = { stackGetterCalls: 0 };
+    safe('Serialization observation', function () {
+      if (!root.console || typeof root.console.debug !== 'function') return;
+      const probe = new Error('attestation probe');
+      Object.defineProperty(probe, 'stack', { configurable: true, get: function () {
+        serialization.stackGetterCalls++; return '';
+      } });
+      root.console.debug(probe);
+    });
     const penalty = Math.min(1, Object.keys(scores).reduce((sum, key) => sum + scores[key], 0));
     return {
       receiverErrorText: receiverErrorText,
+      serialization: serialization,
       tampering_detected: penalty >= 0.5,
       anomalies,
       confidence_penalty: Math.round(penalty * 1000) / 1000

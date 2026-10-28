@@ -347,6 +347,12 @@ function computeScore(payload, headerCheck) {
     clampReason = "fewer than five trusted interaction events reported";
   }
   // Only accept this result via the server-owned argument, never payload fields.
+  const artifacts = payload.kinematics?.pointerArtifacts;
+  if (artifacts && ((artifacts.screenSamples >= 8 && artifacts.zeroScreenDeltaRatio >= 0.9) ||
+      (artifacts.displacementSamples >= 8 && artifacts.zeroMovementRatio >= 0.9))) {
+    score = Math.min(0.30, Math.max(0, score - 0.50)); clamped = true;
+    clampReason = "sustained pointer coordinate inconsistencies";
+  }
   if (headerCheck) {
     breakdown.headers = headerCheck;
     score *= 1 - clamp01(headerCheck.penalty);
