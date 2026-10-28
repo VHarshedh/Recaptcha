@@ -1,8 +1,10 @@
 "use strict";
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { hashPoW, createScratchpad } = require("./pow_verifier");
 const vm = require("node:vm");
 const fs = require("node:fs");
+const { RateLimiter } = require("./attestation/rate_limiter");
 const { createServer } = require("./attestation/server");
 const { SessionStore } = require("./compiler/middleware");
 const { AdaptiveChallenge, difficultyForScore } = require("./attestation/adaptive_challenge");
@@ -14,8 +16,9 @@ const { verifyToken } = require("./attestation/verifier");
 const { compile } = require("./compiler/pipeline");
 
 function solve(challenge, difficulty) {
+  const pad = createScratchpad(challenge);
   for (let nonce = 0; ; nonce++) {
-    if (countLeadingZeroBits(crypto.createHash("sha256").update(challenge + nonce).digest()) >= difficulty) return { nonce };
+    if (countLeadingZeroBits(hashPoW(challenge, nonce, pad)) >= difficulty) return { nonce };
   }
 }
 const headers = { "user-agent": "Mozilla/5.0 Chrome/130.0", "accept-language": "en-US",
@@ -35,18 +38,25 @@ async function main() {
   const visual = generateVisual(secret, "test-id");
   assert.equal(visual.answerHash.length, 32);
   assert(!JSON.stringify(visual.instructions).includes("<text"));
-  assert.equal(visual.instructions.noise.fps, 30);
+  assert.equal(visual.instructions.noise.fps, 60);
   assert(visual.instructions.noise.particles >= 250);
   const curves = visual.instructions.paths.filter(p => p.d.includes("C"));
-  assert(curves.length >= 12 && curves.length <= 18);
+  assert.equal(curves.length, visual.instructions.paths.length);
+  for (const p of curves) { assert.deepEqual(Object.keys(p).sort(), ["color", "d", "layer"]); assert.equal(p.d.replace(/[^A-Z]/g, ""), "MCCZ"); }
   assert.notDeepEqual(renderAnswer("ABC234"), renderAnswer("ABC234"));
   const sessions = new SessionStore();
   const challenges = new SessionStore(100, 60_000);
   // Inject a known answer only in this test, while exercising the real renderer.
-  const adaptive = new AdaptiveChallenge(challenges, { secret, visualFactory: (key, id) => ({
+  // Exercise real hashing at low difficulty to avoid probabilistic timeout
+  // failures on slow CI machines; assert the requested policy difficulty too.
+  let requestedDifficulty;
+  const adaptive = new AdaptiveChallenge(challenges, { secret,
+    powFactory: difficulty => { requestedDifficulty = difficulty; return { ...generateChallenge(), difficulty: 8 }; },
+    visualFactory: (key, id) => ({
     answerHash: answerHash(key, "ABC234", id), instructions: renderAnswer("ABC234"),
   }) });
-  const server = createServer({ sessionStore: sessions, adaptive });
+  const rateLimiter = new RateLimiter({ maxRequests: 1000, failureLimit: 1000 });
+  const server = createServer({ sessionStore: sessions, adaptive, rateLimiter });
   // Native synchronous mining blocks this test process; avoid stale keep-alive
   // sockets while mining. Production mining runs in the browser worker.
   server.keepAliveTimeout = 120_000;
@@ -74,7 +84,7 @@ async function main() {
   }
   function submission(result, solution, answer = "") {
     return { sessionId: result.sessionId, challengeId: result.challengeId, challengeToken: result.challengeToken,
-      answer, powSolution: solution };
+      answer, powSolution: solution, modalKinematics: { untrustedCount: 0, trustedKeydowns: 6, dwellCount: 6, ttfkMs: 400, totalTypingMs: 800, dwellVariance: 10, intervalVariance: 20 } };
   }
   function checkToken(result) {
     assert.equal(result.status, "passed");
@@ -91,24 +101,39 @@ async function main() {
     fx = fixture(); const passive = human(); passive.kinematics.eventCounts = {};
     response = await fx.assess(passive);
     const grey = response.data;
-    assert.equal(grey.status, "step_up_pow"); assert.equal(grey.score, 0.45); assert.equal(grey.pow.difficulty, 20);
+    assert.equal(grey.status, "step_up_visual"); assert.equal(grey.score, 0.30); assert.equal(requestedDifficulty, 21);
     assert.equal(grey.token, undefined);
-    const greyWire = fx.encrypt(submission(grey, solve(grey.pow.challenge, grey.pow.difficulty)));
+    const greyWire = fx.encrypt(submission(grey, solve(grey.pow.challenge, grey.pow.difficulty), "abc234"));
     checkToken((await post("/attest/verify-challenge", greyWire)).data);
     assert.equal((await post("/attest/verify-challenge", greyWire)).status, 403);
     console.log("Adaptive PoW upgrade and replay checks passed");
 
     const suspicious = human(); suspicious.runtime.confidence_penalty = 0.8;
     for (const answer of ["ZZZZZZ", "abc234"]) {
+      rateLimiter.success("127.0.0.0/24");
       fx = fixture(); const low = (await fx.assess(suspicious)).data;
-      assert.equal(low.status, "step_up_visual"); assert.equal(low.pow.difficulty, 21); assert.equal(low.token, undefined);
+      assert.equal(low.status, "step_up_visual"); assert.equal(requestedDifficulty, 21); assert.equal(low.token, undefined);
       assert(!JSON.stringify(low).includes("ABC234"));
       const ct = Buffer.from(low.rendering.ct, "base64");
       const decipher = crypto.createDecipheriv("aes-256-gcm", fx.key, Buffer.from(low.rendering.iv, "base64"));
       decipher.setAuthTag(ct.subarray(-16));
       const instructions = JSON.parse(Buffer.concat([decipher.update(ct.subarray(0, -16)), decipher.final()]));
       assert(instructions.paths.length > 100); assert.equal(instructions.noise.particles, 300);
-      const wire = fx.encrypt(submission(low, solve(low.pow.challenge, low.pow.difficulty), answer));
+      const solution = solve(low.pow.challenge, low.pow.difficulty);
+      const wire = fx.encrypt(submission(low, solution, answer));
+      if (answer === "abc234") {
+        // Isolate telemetry rejection with valid work/answer. Restore the test
+        // fixture only; production challenges remain strictly single attempt.
+        const entry = challenges._map.get(fx.sid);
+        for (const bad of [undefined, { untrustedCount: 1 }, { trustedKeydowns: 5 },
+          { totalTypingMs: 299 }, { dwellVariance: 0 }, { ttfkMs: 249 }]) {
+          const data = submission(low, solution, answer);
+          data.modalKinematics = bad === undefined ? undefined : { ...data.modalKinematics, ...bad };
+          assert.equal((await post("/attest/verify-challenge", fx.encrypt(data))).status, 403);
+          assert.equal(challenges.consume(fx.sid), null);
+          challenges.set(fx.sid, entry);
+        }
+      }
       const verified = await post("/attest/verify-challenge", wire);
       if (answer === "abc234") checkToken(verified.data); else assert.equal(verified.status, 403);
       assert.equal((await post("/attest/verify-challenge", wire)).status, 403);
@@ -136,7 +161,12 @@ async function main() {
     assert(verifyHeaderConsistency(firefox, firefox, { ...human(), hardware: { profile: { userAgent: firefox.ua } } }).penalty >= 0.5);
     console.log("Expiry, signature, bad-work, header spoofing, and session-binding checks passed");
 
+    for (let i = 0; i < 3; i++) rateLimiter.failure("127.0.0.0/24");
+    const penalized = (await fixture().assess(human())).data;
+    assert.equal(penalized.status, "step_up_visual"); assert(penalized.score <= 0.30);
+    assert.equal(requestedDifficulty, 22);
     // Exercise generated crypto + flattened orchestrator, with an actual server token.
+    rateLimiter.success("127.0.0.0/24");
     const build = compile({ sourceFiles: ["runtime_integrity.js", "hardware_consistency.js", "kinematics.js"] });
     sessions.set(build.ecdhKeyPair.id, { keyPair: build.ecdhKeyPair, expectedVmState: build.expectedVmState,
       headerProfile: requestProfile, pow: { ...build.pow, issuedAt: Number(build.pow.challenge.split(".")[0]) } });
@@ -148,10 +178,12 @@ async function main() {
       addEventListener() {}, removeEventListener() {},
       solvePoW: async opts => ({ ...solve(opts.challenge, opts.difficulty), durationMs: 100 }),
       fetch: (url, opts) => fetch(origin + url, { ...opts, headers: { ...headers, ...opts.headers } }) });
+    context.window = context; context.navigator = { [Symbol.toStringTag]: "Navigator" };
+    context.document = { createElement: () => ({ getContext: () => ({ fillRect() {} }) }) };
     vm.runInContext(build.bundle, context);
     context.RuntimeIntegrity = { collect: () => human().runtime };
     context.HardwareConsistency = { collect: async () => human().hardware };
-    context.Kinematics = { getBiometricVector: () => passive.kinematics };
+    context.Kinematics = { getBiometricVector: () => human().kinematics };
     const token = await context.__attestation.execute("login");
     assert.equal(typeof token, "string");
     checkToken({ status: "passed", token });
@@ -159,6 +191,7 @@ async function main() {
 
     // DOM simulation exercises the complete compiled visual orchestration,
     // including decrypting the server's rendering stream and drawing Path2D.
+    let clock = 0;
     let canvasDraws = 0, modalRemoved = false, focusRestored = false;
     const elements = [];
     function element(tag) {
@@ -167,12 +200,23 @@ async function main() {
         appendChild(child) { this.children.push(child); return child; },
         setAttribute() {}, checkValidity() { return true; },
         addEventListener(name, fn) { this.events[name] = fn; },
+        removeEventListener() {},
         attachShadow() { return element("shadow"); },
         remove() { modalRemoved = true; },
         focus() {
-          if (tag === "input") queueMicrotask(() => elements.find(e => e.tag === "form").events.submit({ preventDefault() {} }));
+          if (tag === "input") queueMicrotask(() => {
+            const shadow = elements.find(e => e.tag === "shadow");
+            clock += 300;
+            for (let i = 0; i < 6; i++) {
+              shadow.events.keydown({ type: "keydown", target: node, isTrusted: true, key: "a", code: "KeyA" });
+              clock += 45 + i * 3;
+              shadow.events.keyup({ type: "keyup", target: node, isTrusted: true, key: "a", code: "KeyA" });
+              clock += 80 + i;
+            }
+            elements.find(e => e.tag === "form").events.submit({ preventDefault() {} });
+          });
         },
-        getContext() { return { fillRect() { canvasDraws++; }, fill() {}, stroke() {} }; },
+        getContext() { return { fillRect() { canvasDraws++; }, fill() {}, stroke() {}, save() {}, restore() {}, translate() {} }; },
       };
       elements.push(node); return node;
     }
@@ -180,12 +224,12 @@ async function main() {
     sessions.set(visualBuild.ecdhKeyPair.id, { keyPair: visualBuild.ecdhKeyPair, expectedVmState: visualBuild.expectedVmState,
       headerProfile: requestProfile, pow: { ...visualBuild.pow, issuedAt: Number(visualBuild.pow.challenge.split(".")[0]) } });
     const visualContext = vm.createContext({ crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
-      TextEncoder, TextDecoder, AbortController, atob, btoa, performance, setTimeout, clearTimeout, setInterval, clearInterval,
+      TextEncoder, TextDecoder, AbortController, atob, btoa, performance: { now: () => clock }, setTimeout, clearTimeout, setInterval, clearInterval,
       addEventListener() {}, removeEventListener() {}, Path2D: class { constructor(path) { assert(path.startsWith("M")); } },
       document: { body: element("body"), activeElement: { focus() { focusRestored = true; } }, createElement: element },
       solvePoW: async opts => ({ ...solve(opts.challenge, opts.difficulty), durationMs: 100 }),
       fetch: (url, opts) => fetch(origin + url, { ...opts, headers: { ...headers, ...opts.headers } }) });
-    visualContext.window = visualContext;
+    visualContext.window = visualContext; visualContext.navigator = { [Symbol.toStringTag]: "Navigator" };
     vm.runInContext(visualBuild.bundle, visualContext);
     visualContext.RuntimeIntegrity = { collect: () => suspicious.runtime };
     visualContext.HardwareConsistency = { collect: async () => human().hardware };

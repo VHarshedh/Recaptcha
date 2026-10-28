@@ -5,6 +5,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { hashPoW, createScratchpad } = require("./pow_verifier");
 const { generateEphemeralKeyPair, decryptTelemetry, deriveSessionKey } = require("./compiler/ecdh_session");
 const { generateChallenge, verifyPoW, countLeadingZeroBits } = require("./pow_verifier");
 const { computeScore } = require("./attestation/scorer");
@@ -13,10 +14,11 @@ const { verifyToken } = require("./attestation/verifier");
 const { maskIP } = require("./attestation/ip_mask");
 
 function solvePoWLocal(challenge, difficulty) {
+  const pad = createScratchpad(challenge);
   let nonce = 0;
   const t0 = Date.now();
   while (true) {
-    const hash = crypto.createHash("sha256").update(challenge + String(nonce)).digest();
+    const hash = hashPoW(challenge, nonce, pad);
     if (countLeadingZeroBits(hash) >= difficulty) {
       return {
         nonce,

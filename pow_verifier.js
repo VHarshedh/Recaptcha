@@ -11,6 +11,12 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { createScratchpad, scratchSuffix } = require("./pow/scratchpad");
+// Precompute at issuance. Bounded to 8 MiB; cache misses safely reconstruct.
+const scratchpads = new Map();
+function hashPoW(challenge, nonce, pad = scratchpads.get(challenge) || createScratchpad(challenge)) {
+  return crypto.createHash("sha256").update(challenge + String(nonce) + scratchSuffix(pad, nonce)).digest();
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -61,8 +67,11 @@ function timingSafeEqual(a, b) {
 function generateChallenge() {
   const issuedAt = Date.now();
   const random = crypto.randomBytes(16).toString("hex");
+  const challenge = `${issuedAt}.${random}`;
+  if (scratchpads.size >= 128) scratchpads.delete(scratchpads.keys().next().value);
+  scratchpads.set(challenge, createScratchpad(challenge));
   return {
-    challenge: `${issuedAt}.${random}`,
+    challenge,
     issuedAt,
   };
 }
@@ -99,10 +108,10 @@ function verifyPoW({
   maxAgeMs = 60_000,
 }) {
   // ---- Input validation ------------------------------------------------
-  if (typeof challenge !== "string" || challenge.length === 0) {
+  if (typeof challenge !== "string" || challenge.length === 0 || challenge.length > 256) {
     return { valid: false, reason: "invalid challenge" };
   }
-  if (!Number.isFinite(nonce) || nonce < 0 || !Number.isInteger(nonce)) {
+  if (!Number.isSafeInteger(nonce) || nonce < 0) {
     return { valid: false, reason: "invalid nonce" };
   }
   if (
@@ -126,8 +135,7 @@ function verifyPoW({
   }
 
   // ---- Hash computation (single SHA-256) --------------------------------
-  const message = challenge + String(nonce);
-  const hashBuf = crypto.createHash("sha256").update(message).digest();
+  const hashBuf = hashPoW(challenge, nonce);
   const hashHex = hashBuf.toString("hex");
 
   // ---- Leading zero-bit check -------------------------------------------
@@ -148,6 +156,8 @@ function verifyPoW({
 /* ------------------------------------------------------------------ */
 
 module.exports = {
+  hashPoW,
+  createScratchpad,
   generateChallenge,
   verifyPoW,
   countLeadingZeroBits,

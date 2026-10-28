@@ -43,6 +43,24 @@ function countLeadingZeroBits(bytes) {
  * Encode a string into a Uint8Array (UTF-8).  We avoid TextEncoder
  * instantiation inside the hot loop by keeping a module-level encoder.
  */
+function createScratchpad(challenge) {
+  var pad = new Int32Array(16384), seed = 2166136261;
+  for (var i = 0; i < challenge.length; i++) seed = Math.imul(seed ^ challenge.charCodeAt(i), 16777619);
+  for (var j = 0; j < pad.length; j++) {
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+    seed = (seed + Math.imul(j + 1, 0x9e3779b9)) | 0; pad[j] = seed;
+  }
+  return pad;
+}
+function scratchSuffix(pad, nonce) {
+  var x = (nonce | 0) ^ Math.floor(nonce / 4294967296), y = 0x6a09e667;
+  for (var i = 0; i < 64; i++) {
+    x = Math.imul(x ^ pad[(x ^ y) & 16383], 0x85ebca6b);
+    x = (x << 13) | (x >>> 19);
+    y = (Math.imul(y ^ x, 0xc2b2ae35) + i) | 0;
+  }
+  return ":cache64-v1:" + (x >>> 0) + ":" + (y >>> 0);
+}
 const encoder = new TextEncoder();
 
 /**
@@ -88,7 +106,8 @@ async function mine(challenge, difficulty) {
   // Because nonce length varies, we rebuild the tail each iteration.
   // To minimise allocations we reuse a shared buffer large enough for
   // challenge + up to 20 digits of nonce (2^64 has 20 decimal digits).
-  const maxNonceLen = 20;
+  const maxNonceLen = 80;
+  const pad = createScratchpad(challenge);
   const buf = new Uint8Array(challengeBytes.length + maxNonceLen);
   buf.set(challengeBytes, 0);
 
@@ -97,7 +116,7 @@ async function mine(challenge, difficulty) {
 
   while (true) {
     // Encode nonce suffix directly into buf to avoid per-iteration allocs.
-    const nonceStr = String(nonce);
+    const nonceStr = String(nonce) + scratchSuffix(pad, nonce);
     const nonceLen = nonceStr.length;
     for (let j = 0; j < nonceLen; j++) {
       buf[challengeBytes.length + j] = nonceStr.charCodeAt(j);

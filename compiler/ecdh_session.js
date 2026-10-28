@@ -90,6 +90,8 @@ var _getRandomValues = crypto["getRandomValues"]["bind"](crypto);
 })();
 
 async function ${name}(payloadObj, endpointUrl, vmState) {
+  // The state includes runtime invariants; never coerce missing/invalid state to zero.
+  if (!Number["isInteger"](vmState) || vmState !== (vmState | 0)) throw new Error("invalid execution state");
   var spkiB64 = "${serverPubKeyBase64}";
   var sessionId = "${sessionId}";
 

@@ -12,8 +12,60 @@ const { computeScore } = require("./attestation/scorer");
 const { getClientIP } = require("./attestation/ip_mask");
 const { issueToken } = require("./attestation/token");
 const { attestationMiddleware } = require("./attestation/verifier");
+const { RateLimiter } = require("./attestation/rate_limiter");
+const { validModalKinematics } = require("./attestation/adaptive_challenge");
+const { createServer } = require("./attestation/server");
+const { maskIP } = require("./attestation/ip_mask");
 
 async function main() {
+  const modal = { untrustedCount: 0, trustedKeydowns: 6, dwellCount: 6, ttfkMs: 250,
+    totalTypingMs: 300, dwellVariance: 1, intervalVariance: 1 };
+  assert(validModalKinematics(modal));
+  for (const invalid of [null, {}, { ...modal, untrustedCount: 1 }, { ...modal, trustedKeydowns: 5 },
+    { ...modal, totalTypingMs: 299 }, { ...modal, ttfkMs: 249 }, { ...modal, dwellVariance: 0 },
+    { ...modal, dwellCount: 0 }, { ...modal, dwellVariance: NaN }, { ...modal, ttfkMs: "300" }])
+    assert(!validModalKinematics(invalid));
+  let time = 1000;
+  const limiter = new RateLimiter({ now: () => time, maxRequests: 2, windowMs: 1000,
+    cooldownMs: 1000, failureWindowMs: 5000, maxEntries: 2 });
+  const subnet = maskIP("192.0.2.1");
+  assert(limiter.check(subnet).allowed); assert(limiter.check(maskIP("192.0.2.99")).allowed);
+  assert(!limiter.check(subnet).allowed);
+  time += 1000; assert(limiter.check(subnet).allowed);
+  for (let i = 0; i < 3; i++) limiter.failure(subnet);
+  assert.equal(limiter.penalty(subnet), 0.50);
+  limiter.success(subnet); assert.equal(limiter.penalty(subnet), 0);
+  for (let i = 0; i < 5; i++) limiter.failure(subnet);
+  assert(!limiter.check(subnet).allowed);
+  time += 1000; assert(limiter.check(subnet).allowed);
+  limiter.failure(subnet); assert.equal(limiter.check(subnet).retryAfter, 2);
+  assert(limiter.check("other").allowed); assert(!limiter.check("overflow").allowed);
+  time += 6000; assert(limiter.check("overflow").allowed); assert(limiter.entries.size <= 2);
+  const limitedServer = createServer({ rateLimit: { maxRequests: 2 } });
+  await new Promise(resolve => limitedServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const origin = `http://127.0.0.1:${limitedServer.address().port}`;
+    for (const path of ["/attest", "/attest/verify-challenge"])
+      assert.equal((await fetch(origin + path, { method: "POST", body: "{}" })).status, 403);
+    const blocked = await fetch(origin + "/collector.js");
+    assert.equal(blocked.status, 429); assert(Number(blocked.headers.get("retry-after")) > 0);
+  } finally { await new Promise(resolve => limitedServer.close(resolve)); }
+  const failureStore = new SessionStore(), reputation = new RateLimiter({ maxRequests: 100 });
+  const failureServer = createServer({ sessionStore: failureStore, rateLimiter: reputation });
+  await new Promise(resolve => failureServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const origin = `http://127.0.0.1:${failureServer.address().port}`;
+    const build = compile({ powDifficulty: 1 });
+    for (let i = 0; i < 8; i++) {
+      failureStore.set(build.ecdhKeyPair.id, { keyPair: build.ecdhKeyPair, expectedVmState: build.expectedVmState });
+      const response = await fetch(origin + "/attest", { method: "POST", body: JSON.stringify({
+        sid: build.ecdhKeyPair.id, cpk: build.ecdhKeyPair.publicKeyBase64,
+        iv: Buffer.alloc(12).toString("base64"), ct: Buffer.alloc(32).toString("base64") }) });
+      assert.equal(response.status, 400);
+      if (i === 2) assert.equal(reputation.penalty(maskIP("127.0.0.1")), 0.50);
+    }
+    assert.equal((await fetch(origin + "/collector.js")).status, 429);
+  } finally { await new Promise(resolve => failureServer.close(resolve)); }
   const keyEnv = { ...process.env, NODE_ENV: "production" };
   delete keyEnv.ATTESTATION_KEY_PATH;
   const missingKey = spawnSync(process.execPath, ["-e", 'require("./attestation/keys")'], { env: keyEnv, encoding: "utf8" });
@@ -56,9 +108,9 @@ async function main() {
     runtime: { receiverErrorText: "TypeError: 'get languages' called on an object that does not implement interface Navigator." } };
   assert.equal(verifyHeaderConsistency(firefox, firefox, ffTelemetry).penalty, 0);
   assert(verifyHeaderConsistency(firefox, firefox, { ...ffTelemetry, runtime: telemetry.runtime }).penalty >= 0.5);
-  for (const counts of [{}, { rejectedUntrusted: 100 }, { mousemove: "100" }, { keydown: -1 }, { touchmove: NaN }]) {
+  for (const counts of [{ keydown: 4 }, { keydown: 1 }, {}, { rejectedUntrusted: 100 }, { mousemove: "100" }, { keydown: -1 }, { touchmove: NaN }]) {
     telemetry.kinematics.eventCounts = counts;
-    assert(computeScore(telemetry).score <= 0.45);
+    assert(computeScore(telemetry).score <= 0.30);
   }
   telemetry.kinematics.eventCounts = { keydown: 20 };
   assert(computeScore(telemetry).score > 0.6);
@@ -80,6 +132,9 @@ async function main() {
       addEventListener() {}, removeEventListener() {},
       solvePoW: async () => ({ nonce: 0, durationMs: 1 }),
       fetch: async (_url, opts) => { wire = JSON.parse(opts.body); return { ok: true, json: async () => ({ status: "passed", token: "test-token" }) }; } });
+    context.window = context;
+    context.navigator = { [Symbol.toStringTag]: "Navigator" };
+    context.document = { createElement: () => ({ getContext: () => ({ fillRect() {} }) }) };
     vm.runInContext(build.bundle, context);
     assert.equal(typeof context.RuntimeIntegrity.collect, "function");
     await context.__attestation.execute("login");
@@ -92,6 +147,23 @@ async function main() {
     assert.throws(() => decryptTelemetry(wire, build.ecdhKeyPair.privateKey));
     assert.throws(() => decryptTelemetry(wire, build.ecdhKeyPair.privateKey, build.expectedVmState ^ 1));
     assert.throws(() => deriveSessionKey(Buffer.alloc(32), NaN));
+    context.navigator = {};
+    await context.__attestation.execute("login");
+    assert.throws(() => decryptTelemetry(wire, build.ecdhKeyPair.privateKey, build.expectedVmState));
+    context.navigator = { [Symbol.toStringTag]: "Navigator" };
+    await context.__attestation.execute("login");
+    if (i === 0) {
+      const originalDocument = context.document;
+      context.document = { createElement: () => ({ getContext: () => null }) };
+      await context.__attestation.execute("login");
+      assert.throws(() => decryptTelemetry(wire, build.ecdhKeyPair.privateKey, build.expectedVmState));
+      context.document = originalDocument;
+      vm.runInContext('globalThis.savedToString = Function.prototype.toString; Function.prototype.toString = function() { return "patched"; };', context);
+      await context.__attestation.execute("login");
+      assert.throws(() => decryptTelemetry(wire, build.ecdhKeyPair.privateKey, build.expectedVmState));
+      vm.runInContext('Function.prototype.toString = globalThis.savedToString;', context);
+      await context.__attestation.execute("login");
+    }
 
     // Session context reaches the scorer separately from untrusted JSON.
     const store = new SessionStore();

@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { verifyPoW, generateChallenge } = require("./pow_verifier");
+const { verifyPoW, generateChallenge, hashPoW, createScratchpad } = require("./pow_verifier");
 
 async function main() {
   let blob, source, revoked = 0, terminated = 0;
@@ -30,6 +30,20 @@ async function main() {
   assert.equal(revoked, 1); assert.equal(terminated, 1);
   const hashing = vm.createContext({ TextEncoder, performance, self: { addEventListener() {} } });
   vm.runInContext(source, hashing);
+  const pad = createScratchpad(challenge.challenge);
+  assert.equal(pad.byteLength, 65536);
+  for (const nonce of [0, 1, 4294967296, Number.MAX_SAFE_INTEGER]) {
+    const browserPad = hashing.createScratchpad(challenge.challenge);
+    assert.deepEqual(Array.from(browserPad), Array.from(pad));
+    const input = challenge.challenge + nonce + hashing.scratchSuffix(browserPad, nonce);
+    assert.equal(Buffer.from(hashing.sha256(Buffer.from(input))).toString("hex"), hashPoW(challenge.challenge, nonce, pad).toString("hex"));
+  }
+  const external = vm.createContext({ TextEncoder, performance, crypto: crypto.webcrypto, self: { addEventListener() {}, postMessage() {} } });
+  vm.runInContext(fs.readFileSync("pow_worker.js", "utf8"), external);
+  const externalSolution = await external.mine(challenge.challenge, 8);
+  assert(verifyPoW({ ...challenge, difficulty: 8, nonce: externalSolution.nonce }).valid);
+  for (const file of ["pow_inline.js", "pow_worker.js"])
+    assert.equal(fs.readFileSync(file, "utf8"), fs.readFileSync("client/" + file, "utf8"));
   for (const text of ["", "abc", "a".repeat(55), "b".repeat(56), "c".repeat(64), "d".repeat(1000)]) {
     assert.equal(Buffer.from(hashing.sha256(Buffer.from(text))).toString("hex"), crypto.createHash("sha256").update(text).digest("hex"));
   }

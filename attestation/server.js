@@ -15,6 +15,7 @@
 "use strict";
 
 const http = require("node:http");
+const { RateLimiter } = require("./rate_limiter");
 const { AdaptiveChallenge } = require("./adaptive_challenge");
 const { verifyToken } = require("./verifier");
 const { maskIP, getClientIP } = require("./ip_mask");
@@ -23,7 +24,7 @@ const { createMiddleware, createDecryptHandler, SessionStore } = require("../com
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
 
-function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)) } = {}) {
+function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), rateLimit = {}, rateLimiter = new RateLimiter(rateLimit) } = {}) {
 const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessionStore });
 
 /* ------------------------------------------------------------------ */
@@ -58,14 +59,20 @@ function readBody(req, maxBytes = 65_536) {
 
 // POST /attest handler — mandatory ECDH decryption + server-verified PoW
 const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res, headerCheck, session) => {
-  return json(res, 200, adaptive.assess(telemetry, req, headerCheck, session));
-});
+  const key = maskIP(getClientIP(req));
+  const result = adaptive.assess(telemetry, req, headerCheck, session, rateLimiter.penalty(key));
+  if (result.status === "passed") rateLimiter.success(key);
+  return json(res, 200, result);
+}, (req) => rateLimiter.failure(maskIP(getClientIP(req))));
 
 async function handleChallenge(req, res) {
   try {
     const body = JSON.parse((await readBody(req)).toString("utf8"));
-    return json(res, 200, adaptive.verify(body, req));
+    const result = adaptive.verify(body, req);
+    rateLimiter.success(maskIP(getClientIP(req)));
+    return json(res, 200, result);
   } catch (_) {
+    rateLimiter.failure(maskIP(getClientIP(req)));
     return json(res, 403, { status: "failed", error: "Challenge failed or expired. Start again." });
   }
 }
@@ -109,6 +116,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = req.url?.split("?")[0];
+  if (["/collector.js", "/attest", "/attest/verify-challenge"].includes(url)) {
+    const limit = rateLimiter.check(maskIP(getClientIP(req)));
+    if (!limit.allowed) {
+      res.setHeader("Retry-After", String(limit.retryAfter));
+      return json(res, 429, { error: "Too many requests" });
+    }
+  }
 
   try {
     if (url === "/collector.js" && req.method === "GET") return collectorMiddleware(req, res);

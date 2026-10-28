@@ -156,7 +156,7 @@ function createMiddleware(opts = {}) {
  * @param {Function}     onTelemetry — callback(plaintext, req, res)
  * @returns {Function}   (req, res) => void
  */
-function createDecryptHandler(sessionStore, onTelemetry) {
+function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
   return async function decryptHandler(req, res) {
     try {
       const chunks = [];
@@ -180,12 +180,14 @@ function createDecryptHandler(sessionStore, onTelemetry) {
 
       // Mandatory ECDH — reject plaintext or missing crypto envelope
       if (!body || !body.cpk || !body.iv || !body.ct || !body.sid) {
+        onFailure(req);
         res.writeHead(403, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "missing or invalid encrypted payload envelope" }));
       }
 
       const session = sessionStore.consume(body.sid);
       if (!session) {
+        onFailure(req);
         res.writeHead(403, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "unknown or expired session" }));
       }
@@ -211,6 +213,7 @@ function createDecryptHandler(sessionStore, onTelemetry) {
       }
 
       // Overwrite client-reported PoW with server's verification
+      if (!powVerification.valid) onFailure(req);
       plaintext.pow = {
         serverVerified: powVerification.valid,
         difficulty: expectedDifficulty,
@@ -223,6 +226,7 @@ function createDecryptHandler(sessionStore, onTelemetry) {
         verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext),
         { ...session, sessionId: body.sid, clientPublicKey: body.cpk });
     } catch (err) {
+      onFailure(req);
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "invalid payload" }));

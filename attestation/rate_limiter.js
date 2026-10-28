@@ -1,0 +1,47 @@
+"use strict";
+// Bounded sliding windows. At capacity fail closed rather than evicting bans.
+class RateLimiter {
+  constructor({ maxRequests = 30, windowMs = 60_000, maxEntries = 10000,
+    failureWindowMs = 300000, failureLimit = 8, cooldownMs = 60000,
+    maxCooldownMs = 900000, now = Date.now } = {}) {
+    for (const value of [maxRequests, windowMs, maxEntries, failureWindowMs, failureLimit, cooldownMs, maxCooldownMs])
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error("invalid rate limit option");
+    Object.assign(this, { maxRequests, windowMs, maxEntries, failureWindowMs, failureLimit, cooldownMs, maxCooldownMs, now });
+    this.entries = new Map();
+  }
+  entry(key) {
+    const now = this.now();
+    for (const [id, e] of this.entries)
+      if (now - e.last >= Math.max(this.windowMs, this.failureWindowMs) && now >= e.until) this.entries.delete(id);
+    let e = this.entries.get(key);
+    if (!e) {
+      if (this.entries.size >= this.maxEntries) return null;
+      e = { requests: [], failures: [], consecutive: 0, strikes: 0, until: 0, last: now };
+      this.entries.set(key, e);
+    }
+    e.requests = e.requests.filter(t => t > now - this.windowMs);
+    e.failures = e.failures.filter(t => t > now - this.failureWindowMs);
+    if (!e.failures.length) e.consecutive = 0;
+    e.last = now;
+    return e;
+  }
+  check(key) {
+    const e = this.entry(key), now = this.now();
+    if (!e) return { allowed: false, retryAfter: Math.ceil(this.windowMs / 1000) };
+    const until = Math.max(e.until, e.requests.length >= this.maxRequests ? e.requests[0] + this.windowMs : 0);
+    if (until > now) return { allowed: false, retryAfter: Math.ceil((until - now) / 1000) };
+    e.requests.push(now);
+    return { allowed: true };
+  }
+  failure(key) {
+    const e = this.entry(key); if (!e) return;
+    e.consecutive++; e.failures.push(this.now());
+    if (e.failures.length >= this.failureLimit) {
+      e.until = this.now() + Math.min(this.maxCooldownMs, this.cooldownMs * 2 ** Math.min(e.strikes++, 20));
+      e.failures = e.failures.slice(-this.failureLimit);
+    }
+  }
+  success(key) { const e = this.entry(key); if (e) e.consecutive = 0; }
+  penalty(key) { const e = this.entry(key); return !e || e.consecutive >= 3 ? 0.50 : 0; }
+}
+module.exports = { RateLimiter };

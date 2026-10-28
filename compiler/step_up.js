@@ -12,7 +12,8 @@ async function completeAttestation(result, sendStep) {
       "timeoutMs": remainingMs, "signal": controller["signal"] });
     var values = await Promise.all([work, modal ? modal["answer"] : Promise.resolve("")]);
     var verified = await sendStep({ "sessionId": result["sessionId"], "challengeId": result["challengeId"],
-      "challengeToken": result["challengeToken"], "answer": values[1], "powSolution": values[0] });
+      "challengeToken": result["challengeToken"], "answer": values[1], "powSolution": values[0],
+      "modalKinematics": modal ? modal["telemetry"]() : null });
     if (verified["status"] !== "passed" || typeof verified["token"] !== "string") throw new Error("Challenge verification failed");
     return verified["token"];
   } finally {
@@ -44,6 +45,33 @@ function openVisualChallenge(instructions, ttl) {
   actions["append"](cancel, submit); form["append"](heading, help, canvas, label, input, actions);
   backdrop["appendChild"](form); shadow["appendChild"](backdrop); document["body"]["appendChild"](host);
   var frameTimer, expiryTimer, rejectAnswer, finished = false;
+  var openedAt = performance["now"](), firstKey = null, lastKey = null, lastUp = null;
+  var down = {}, dwells = [], intervals = [], trustedKeydowns = 0, untrustedCount = 0, pointerCount = 0;
+  function track(event) {
+    if (finished) return;
+    if (!event["isTrusted"]) { untrustedCount++; return; }
+    var now = performance["now"](), type = event["type"], key = event["code"] || event["key"];
+    if (type === "keydown" && event["target"] === input && !event["repeat"] && event["key"]["length"] === 1) {
+      if (firstKey === null) firstKey = now;
+      if (lastKey !== null) intervals["push"](now - lastKey);
+      lastKey = now; trustedKeydowns++; down[key] = now;
+    } else if (type === "keyup" && Object["prototype"]["hasOwnProperty"]["call"](down, key)) {
+      dwells["push"](now - down[key]); delete down[key]; lastUp = now;
+    } else if (type === "pointermove" || type === "mousemove" || type === "pointerdown") pointerCount++;
+  }
+  var eventTypes = ["keydown", "keyup", "pointermove", "mousemove", "pointerdown"];
+  eventTypes["forEach"](function(type) { shadow["addEventListener"](type, track, true); });
+  function variance(values) {
+    if (values["length"] < 2) return 0;
+    var mean = values["reduce"](function(a, b) { return a + b; }, 0) / values["length"];
+    return values["reduce"](function(a, b) { return a + (b - mean) * (b - mean); }, 0) / values["length"];
+  }
+  function telemetry() {
+    return { "untrustedCount": untrustedCount, "trustedKeydowns": trustedKeydowns, "pointerCount": pointerCount,
+      "dwellCount": dwells["length"], "ttfkMs": firstKey === null ? 0 : firstKey - openedAt,
+      "totalTypingMs": firstKey === null || lastUp === null ? 0 : lastUp - firstKey,
+      "dwellVariance": variance(dwells), "intervalVariance": variance(intervals) };
+  }
   var ctx, shapes;
   try {
     ctx = canvas["getContext"]("2d");
@@ -51,14 +79,17 @@ function openVisualChallenge(instructions, ttl) {
     shapes = instructions["paths"]["map"](function(shape) { return { "path": new Path2D(shape["d"]), "style": shape }; });
   } catch (error) { destroy(); throw error; }
   var seed = instructions["noise"]["seed"];
+  var layer = 0;
   function randomNoise() { seed = (Math.imul(seed, 1664525) + 1013904223) | 0; return (seed >>> 0) / 4294967296; }
   function paint() {
     ctx["globalAlpha"] = 1; ctx["fillStyle"] = instructions["background"]; ctx["fillRect"](0, 0, canvas["width"], canvas["height"]);
     shapes["forEach"](function(shape) {
-      ctx["fillStyle"] = ctx["strokeStyle"] = shape["style"]["color"]; ctx["lineWidth"] = shape["style"]["width"];
-      if (shape["style"]["fill"]) ctx["fill"](shape["path"]);
-      ctx["stroke"](shape["path"]);
+      if (shape["style"]["layer"] !== layer) return;
+      ctx["fillStyle"] = shape["style"]["color"];
+      ctx["save"](); ctx["translate"]((randomNoise() - 0.5) * 0.8, (randomNoise() - 0.5) * 0.8);
+      ctx["fill"](shape["path"]); ctx["restore"]();
     });
+    layer = (layer + 1) % 3;
     ctx["globalAlpha"] = instructions["noise"]["opacity"];
     for (var particle = 0; particle < instructions["noise"]["particles"]; particle++) {
       ctx["fillStyle"] = instructions["palette"][Math.floor(randomNoise() * instructions["palette"]["length"])];
@@ -66,6 +97,7 @@ function openVisualChallenge(instructions, ttl) {
     }
   }
   function destroy() {
+    eventTypes["forEach"](function(type) { shadow["removeEventListener"](type, track, true); });
     clearInterval(frameTimer); clearTimeout(expiryTimer); host["remove"]();
     if (!finished && rejectAnswer) { finished = true; rejectAnswer(new Error("Challenge closed")); }
     if (previousFocus && previousFocus["focus"]) previousFocus["focus"]();
@@ -90,8 +122,8 @@ function openVisualChallenge(instructions, ttl) {
   });
   try {
     paint();
-    if (!(window["matchMedia"] && window["matchMedia"]("(prefers-reduced-motion: reduce)")["matches"])) frameTimer = setInterval(paint, 1000 / 30);
+    frameTimer = setInterval(paint, 1000 / 60);
     input["focus"]();
   } catch (error) { answer["catch"](function() {}); destroy(); throw error; }
-  return { "answer": answer, "destroy": destroy };
+  return { "answer": answer, "destroy": destroy, "telemetry": telemetry };
 }

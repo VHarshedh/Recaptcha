@@ -341,10 +341,10 @@ function computeScore(payload, headerCheck) {
     clampReason = "PoW server verification failed";
   }
 
-  if (countInteractions(payload.kinematics?.eventCounts) === 0 && score > 0.45) {
-    score = 0.45;
+  if (countInteractions(payload.kinematics?.eventCounts) < 5 && score > 0.30) {
+    score = 0.30;
     clamped = true;
-    clampReason = "no trusted interaction events reported";
+    clampReason = "fewer than five trusted interaction events reported";
   }
   // Only accept this result via the server-owned argument, never payload fields.
   if (headerCheck) {

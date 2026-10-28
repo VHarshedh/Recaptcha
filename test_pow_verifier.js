@@ -7,6 +7,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { hashPoW, createScratchpad } = require("./pow_verifier");
 const { generateChallenge, verifyPoW, countLeadingZeroBits } = require("./pow_verifier");
 
 let passed = 0;
@@ -48,9 +49,10 @@ console.log("\n── verifyPoW – valid solution ──");
   const difficulty = 8;
   let nonce = 0;
   let hashHex;
+  const pad = createScratchpad(challenge);
   while (true) {
     const msg = challenge + String(nonce);
-    const buf = crypto.createHash("sha256").update(msg).digest();
+    const buf = hashPoW(challenge, nonce, pad);
     if (countLeadingZeroBits(buf) >= difficulty) {
       hashHex = buf.toString("hex");
       break;

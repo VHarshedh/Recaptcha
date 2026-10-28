@@ -29,6 +29,12 @@ function answerHash(secret, answer, challengeId) {
 function renderAnswer(answer) {
   const palette = ["#334155", "#475569", "#536479"];
   const paths = [];
+  // Signal and clutter use the same generator, palette, size distribution and schema.
+  function blob(point, x, y, layer) {
+    const w = random(2.3, 2.9), h = random(4.5, 5.5), bend = random(-0.5, 0.5);
+    paths.push({ d: `M${point(x, y)}C${point(x + w, y + bend)} ${point(x + w, y + h / 2)} ${point(x + w, y + h)}C${point(x, y + h - bend)} ${point(x, y + h / 2)} ${point(x, y)}Z`,
+      color: palette[crypto.randomInt(palette.length)], layer });
+  }
   const phase = random(0, Math.PI * 2);
   for (let i = 0; i < answer.length; i++) {
     const angle = random(-28, 28) * Math.PI / 180;
@@ -39,26 +45,27 @@ function renderAnswer(answer) {
       return [(35 + i * 45 + x * Math.cos(angle) - y * Math.sin(angle)).toFixed(2),
         (58 + 8 * Math.sin(i + phase) + x * Math.sin(angle) + y * Math.cos(angle)).toFixed(2)].join(" ");
     };
+    let shard = crypto.randomInt(3);
     FONT[answer[i]].split("/").forEach((row, y) => {
       [...row].forEach((pixel, x) => {
         if (pixel !== "1") return;
-        const size = random(4.5, 5.5), left = x * 5, top = y * 5;
-        paths.push({ d: `M${point(left, top)}L${point(left + size, top)}L${point(left + size, top + size)}L${point(left, top + size)}Z`,
-          color: palette[crypto.randomInt(palette.length)], width: random(0.3, 1.1), fill: true });
+        blob(point, x * 5, y * 5, shard++ % 3);
+        blob(point, x * 5 + 2.5, y * 5, shard++ % 3);
       });
     });
   }
-  const curveCount = crypto.randomInt(12, 19);
+  const curveCount = crypto.randomInt(180, 241);
   for (let i = 0; i < curveCount; i++) {
-    const p = () => `${random(0, 310).toFixed(1)} ${random(15, 105).toFixed(1)}`;
-    paths.push({ d: `M${p()}C${p()} ${p()} ${p()}`, color: palette[crypto.randomInt(palette.length)], width: random(0.4, 1.5), fill: false });
+    const angle = random(-0.5, 0.5), x = random(10, 300), y = random(25, 90);
+    const point = (a, b) => `${(x + a * Math.cos(angle) - b * Math.sin(angle)).toFixed(2)} ${(y + a * Math.sin(angle) + b * Math.cos(angle)).toFixed(2)}`;
+    blob(point, 0, 0, i % 3);
   }
   // Shuffle paths so no semantic character grouping/order is transmitted.
   for (let i = paths.length - 1; i > 0; i--) {
     const j = crypto.randomInt(i + 1); [paths[i], paths[j]] = [paths[j], paths[i]];
   }
   return { width: 310, height: 120, background: "#f1f5f9", palette, paths,
-    noise: { fps: 30, particles: 300, seed: crypto.randomBytes(4).readUInt32BE(), opacity: 0.32 } };
+    noise: { fps: 60, particles: 300, seed: crypto.randomBytes(4).readUInt32BE(), opacity: 0.32 } };
 }
 
 function generateVisual(secret, challengeId) {
