@@ -175,16 +175,14 @@ function generateMapping(identifiers, usedNames) {
  * @returns {string}
  */
 function applyMapping(source, mapping) {
-  const names = Object.keys(mapping);
-  if (names.length === 0) return source;
-
-  // Sort longest-first for regex alternation safety.
-  names.sort((a, b) => b.length - a.length);
-
-  const escaped = names.map((n) => n.replace(/[$]/g, "\\$&"));
-  const pattern = new RegExp(`(?<![a-zA-Z0-9_$])(${escaped.join("|")})(?![a-zA-Z0-9_$])`, "g");
-
-  return source.replace(pattern, (match) => mapping[match] || match);
+  const edits = [];
+  const tokenizer = require("acorn").tokenizer(source, { ecmaVersion: "latest" });
+  for (const token of tokenizer) {
+    if (token.type.label === "name" && Object.prototype.hasOwnProperty.call(mapping, token.value))
+      edits.push({ start: token.start, end: token.end, value: mapping[token.value] });
+  }
+  for (const edit of edits.reverse()) source = source.slice(0,edit.start) + edit.value + source.slice(edit.end);
+  return source;
 }
 
 /* ------------------------------------------------------------------ */

@@ -29,20 +29,28 @@ function encryptRendering(instructions, session) {
 }
 
 class AdaptiveChallenge {
-  constructor(store, { secret = crypto.randomBytes(32), visualFactory = generateVisual,
+  constructor(store, { secret = crypto.randomBytes(32), authorize = null, visualFactory = generateVisual,
     powFactory = difficulty => ({ ...generateChallenge(), difficulty }) } = {}) {
+    if (process.env.NODE_ENV === "production" && typeof authorize !== "function")
+      throw new Error("Production requires a server-side authorization policy independent of client telemetry");
+    this.authorize = authorize;
     this.store = store;
     this.secret = secret;
     this.visualFactory = visualFactory;
     this.powFactory = powFactory;
   }
-  assess(telemetry, req, headerCheck, session, reputationPenalty = 0) {
+  async assess(telemetry, req, headerCheck, session, reputationPenalty = 0) {
+    if (this.authorize && await this.authorize(req, telemetry.action) !== true)
+      return { status: "failed", error: "Independent verification required" };
     const result = computeScore(telemetry, headerCheck);
     if (reputationPenalty > 0) result.score = Math.min(0.30, Math.max(0, result.score - reputationPenalty));
     const action = typeof telemetry.action === "string" && telemetry.action ? telemetry.action : "unknown";
     const ipSubnet = maskIP(getClientIP(req));
     const origin = extractHeaderProfile(req).origin;
     const host = extractHeaderProfile(req).host;
+    // A server-authenticated session/passkey policy is also the accessible path.
+    if (this.authorize) return { status: "passed", score: 0.70,
+      ...issueToken({ score: 0.70, action, ipSubnet, origin, host }) };
     if (result.score >= 0.70) return { status: "passed", ...result, ...issueToken({ score: result.score, action, ipSubnet, origin, host }) };
     const challengeId = crypto.randomBytes(16).toString("hex");
     const status = result.score < 0.35 ? "step_up_visual" : "step_up_pow";
@@ -55,14 +63,14 @@ class AdaptiveChallenge {
     const signature = crypto.createHmac("sha256", this.secret).update(encoded).digest("base64url");
     const challengeToken = encoded + "." + signature;
     const visual = status === "step_up_visual" ? this.visualFactory(this.secret, challengeId) : null;
-    if (!this.store.set(session.sessionId, { ...session, claims, challengeToken,
+    if (!await this.store.set(session.sessionId, { ...session, claims, challengeToken,
       answerHash: visual?.answerHash, headerProfile: profile })) throw new Error("challenge capacity reached");
     return { status, score: result.score, sessionId: session.sessionId, challengeId, expiresAt,
-      pow, challengeToken, ...(visual ? { rendering: encryptRendering(visual.instructions, session) } : {}) };
+      pow, challengeToken, ...(visual ? { rendering: encryptRendering(require("./raster").rasterize(visual.instructions), session) } : {}) };
   }
   // Consume before decryption or validation: any attempt burns this challenge.
-  verify(envelope, req) {
-    const entry = this.store.consume(envelope?.sid);
+  async verify(envelope, req) {
+    const entry = await this.store.consume(envelope?.sid);
     if (!entry) throw new Error("unknown, expired, or consumed challenge");
     const { claims } = entry;
     if (!claims || Date.now() >= claims.expiresAt || binding(extractHeaderProfile(req)) !== claims.binding)
@@ -84,6 +92,8 @@ class AdaptiveChallenge {
           !equal(answerHash(this.secret, data.answer, claims.challengeId), entry.answerHash))
         throw new Error("invalid visual answer");
     }
+    if (this.authorize && await this.authorize(req, claims.action) !== true)
+      throw new Error("Independent verification required");
     // A step-up is a policy override, not evidence that passive telemetry improved.
     return { status: "passed", passiveScore: claims.score, score: 0.70,
       ...issueToken({ score: 0.70, action: claims.action, ipSubnet: claims.ipSubnet, origin: claims.origin, host: claims.host }) };

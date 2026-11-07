@@ -10,6 +10,7 @@ API:
 
 from __future__ import annotations
 
+import math
 import hashlib
 import hmac
 import os
@@ -85,17 +86,20 @@ def verify_pow(
         { "valid": bool, "reason"?: str, "hash"?: str }
     """
     # ── Input validation ─────────────────────────────────────────────
-    if not isinstance(challenge, str) or len(challenge) == 0:
+    if not isinstance(challenge, str) or not 0 < len(challenge) <= 1024:
         return {"valid": False, "reason": "invalid challenge"}
 
-    if not isinstance(nonce, int) or nonce < 0:
+    if type(nonce) is not int or not 0 <= nonce <= 9007199254740991:
         return {"valid": False, "reason": "invalid nonce"}
 
-    if not isinstance(difficulty, int) or difficulty < 1 or difficulty > 256:
+    if type(difficulty) is not int or difficulty < 1 or difficulty > 256:
         return {"valid": False, "reason": "invalid difficulty"}
 
-    if not isinstance(issued_at, (int, float)):
+    if type(issued_at) not in (int, float) or not 0 <= issued_at <= 9007199254740991:
         return {"valid": False, "reason": "invalid issued_at"}
+
+    if type(max_age_ms) is not int or not 0 < max_age_ms <= 9007199254740991:
+        return {"valid": False, "reason": "invalid max_age_ms"}
 
     # ── Timestamp freshness ──────────────────────────────────────────
     now_ms = int(time.time() * 1000)
@@ -110,7 +114,23 @@ def verify_pow(
         return {"valid": False, "reason": "challenge issued in the future"}
 
     # ── Hash computation (single SHA-256) ────────────────────────────
-    message = (challenge + str(nonce)).encode("utf-8")
+    seed = 2166136261
+    raw = challenge.encode("utf-16-le")
+    for i in range(0, len(raw), 2):
+        seed = ((seed ^ int.from_bytes(raw[i:i+2], "little")) * 16777619) & 0xffffffff
+    pad = []
+    for j in range(16384):
+        seed ^= (seed << 13) & 0xffffffff
+        seed ^= seed >> 17
+        seed ^= (seed << 5) & 0xffffffff
+        seed = (seed + (j + 1) * 0x9e3779b9) & 0xffffffff
+        pad.append(seed)
+    x, y = (nonce & 0xffffffff) ^ (nonce >> 32), 0x6a09e667
+    for i in range(64):
+        x = ((x ^ pad[(x ^ y) & 16383]) * 0x85ebca6b) & 0xffffffff
+        x = ((x << 13) | (x >> 19)) & 0xffffffff
+        y = ((y ^ x) * 0xc2b2ae35 + i) & 0xffffffff
+    message = (challenge + str(nonce) + f":cache64-v1:{x}:{y}").encode("utf-8")
     digest = hashlib.sha256(message).digest()
     hash_hex = digest.hex()
 

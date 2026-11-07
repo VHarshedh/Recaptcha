@@ -111,15 +111,15 @@ async function main() {
 
     const suspicious = human(); suspicious.runtime.confidence_penalty = 0.8;
     for (const answer of ["ZZZZZZ", "abc234"]) {
-      rateLimiter.success("127.0.0.0/24");
+      rateLimiter.success("127.0.0.1");
       fx = fixture(); const low = (await fx.assess(suspicious)).data;
-      assert.equal(low.status, "step_up_visual"); assert.equal(requestedDifficulty, 21); assert.equal(low.token, undefined);
+      assert.equal(low.status, "step_up_visual"); assert.equal(requestedDifficulty, rateLimiter.penalty("127.0.0.1") ? 22 : 21); assert.equal(low.token, undefined);
       assert(!JSON.stringify(low).includes("ABC234"));
       const ct = Buffer.from(low.rendering.ct, "base64");
       const decipher = crypto.createDecipheriv("aes-256-gcm", fx.key, Buffer.from(low.rendering.iv, "base64"));
       decipher.setAuthTag(ct.subarray(-16));
       const instructions = JSON.parse(Buffer.concat([decipher.update(ct.subarray(0, -16)), decipher.final()]));
-      assert(instructions.paths.length > 100); assert.equal(instructions.noise.particles, 300);
+      assert(instructions.image.startsWith("data:image/png;base64,")); assert.equal(instructions.paths, undefined);
       const solution = solve(low.pow.challenge, low.pow.difficulty);
       const wire = fx.encrypt(submission(low, solution, answer));
       if (answer === "abc234") {
@@ -165,19 +165,19 @@ async function main() {
     assert(verifyHeaderConsistency(firefox, firefox, { ...human(), hardware: { profile: { userAgent: firefox.ua } } }).penalty >= 0.5);
     console.log("Expiry, signature, bad-work, header spoofing, and session-binding checks passed");
 
-    for (let i = 0; i < 3; i++) rateLimiter.failure("127.0.0.0/24");
+    for (let i = 0; i < 3; i++) rateLimiter.failure("127.0.0.1");
     const penalized = (await fixture().assess(human())).data;
     assert.equal(penalized.status, "step_up_visual"); assert(penalized.score <= 0.30);
     assert.equal(requestedDifficulty, 22);
     // Exercise generated crypto + flattened orchestrator, with an actual server token.
-    rateLimiter.success("127.0.0.0/24");
-    const build = compile({ sourceFiles: ["runtime_integrity.js", "hardware_consistency.js", "kinematics.js"] });
+    rateLimiter.success("127.0.0.1");
+    const build = compile({ rawSourceOverride: `var RuntimeIntegrity={collect:()=>(${JSON.stringify(human().runtime)})}; var HardwareConsistency={collect:async()=>(${JSON.stringify(human().hardware)})}; var Kinematics={getBiometricVector:()=>(${JSON.stringify(human().kinematics)})};` });
     sessions.set(build.ecdhKeyPair.id, { keyPair: build.ecdhKeyPair, expectedVmState: build.expectedVmState,
       headerProfile: requestProfile, pow: { ...build.pow, issuedAt: Number(build.pow.challenge.split(".")[0]) } });
     const subtle = {};
     for (const name of ["encrypt", "decrypt", "importKey", "generateKey", "deriveBits", "exportKey", "digest"])
       subtle[name] = crypto.webcrypto.subtle[name].bind(crypto.webcrypto.subtle);
-    const context = vm.createContext({ crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
+    const context = vm.createContext({ Uint8Array, Int32Array, Float32Array, ArrayBuffer, DataView, crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
       TextEncoder, TextDecoder, AbortController, atob, btoa, performance, setTimeout, clearTimeout,
       addEventListener() {}, removeEventListener() {},
       solvePoW: async opts => ({ ...solve(opts.challenge, opts.difficulty), durationMs: 100 }),
@@ -221,16 +221,16 @@ async function main() {
             elements.find(e => e.tag === "form").events.submit({ preventDefault() {} });
           });
         },
-        getContext() { return { fillRect() { canvasDraws++; }, fill() {}, stroke() {}, save() {}, restore() {}, translate() {} }; },
+        getContext() { return { drawImage() { canvasDraws++; }, fillRect() {}, fill() {}, stroke() {}, save() {}, restore() {}, translate() {} }; },
       };
       elements.push(node); return node;
     }
     const visualBuild = compile({ sourceFiles: ["runtime_integrity.js", "hardware_consistency.js", "kinematics.js"], powDifficulty: 8 });
     sessions.set(visualBuild.ecdhKeyPair.id, { keyPair: visualBuild.ecdhKeyPair, expectedVmState: visualBuild.expectedVmState,
       headerProfile: requestProfile, pow: { ...visualBuild.pow, issuedAt: Number(visualBuild.pow.challenge.split(".")[0]) } });
-    const visualContext = vm.createContext({ crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
+    const visualContext = vm.createContext({ Uint8Array, Int32Array, Float32Array, ArrayBuffer, DataView, crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
       TextEncoder, TextDecoder, AbortController, atob, btoa, performance: { now: () => clock }, setTimeout, clearTimeout, setInterval, clearInterval,
-      addEventListener() {}, removeEventListener() {}, Path2D: class { constructor(path) { assert(path.startsWith("M")); } },
+      addEventListener() {}, removeEventListener() {}, Image: class { set src(value) { assert(value.startsWith("data:image/png;base64,")); this.onload(); } },
       document: { body: element("body"), activeElement: { focus() { focusRestored = true; } }, createElement: element },
       solvePoW: async opts => ({ ...solve(opts.challenge, opts.difficulty), durationMs: 100 }),
       fetch: (url, opts) => fetch(origin + url, { ...opts, headers: { ...headers, ...opts.headers } }) });
@@ -240,7 +240,7 @@ async function main() {
     visualContext.HardwareConsistency = { collect: async () => human().hardware };
     visualContext.Kinematics = { getBiometricVector: () => passive.kinematics };
     checkToken({ status: "passed", token: await visualContext.__attestation.execute("login") });
-    assert(canvasDraws >= 301); assert(modalRemoved); assert(focusRestored);
+    assert.equal(canvasDraws, 1); assert(modalRemoved); assert(focusRestored);
     console.log("Compiled visual client decrypts and draws glyphs, submits answer and work, and cleans up modal");
 
     // Client cancellation/error cleanup on the visual path without requiring a DOM.

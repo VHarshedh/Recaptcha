@@ -25,7 +25,9 @@ const { createMiddleware, createDecryptHandler, SessionStore } = require("../com
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
 
-function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()) : [], rateLimit = {}, rateLimiter = new RateLimiter(rateLimit) } = {}) {
+function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()) : [], rateLimit = {}, rateLimiter = new RateLimiter(rateLimit), passkeys = null } = {}) {
+if (process.env.NODE_ENV === "production" && process.env.ATTESTATION_STATE_MODE !== "single-process" && !(sessionStore.distributed && adaptive.store.distributed && rateLimiter.distributed))
+  throw new Error("Local state requires ATTESTATION_STATE_MODE=single-process; clustered deployment is unsupported");
 const origins = new Set(allowedOrigins.map(value => { const origin = normalizeOrigin(value); if (!origin) throw new Error("invalid allowed origin"); return origin; }));
 const collectorMiddleware = createMiddleware({ attestEndpoint: "/attest", sessionStore });
 
@@ -60,21 +62,21 @@ function readBody(req, maxBytes = 65_536) {
 /* ------------------------------------------------------------------ */
 
 // POST /attest handler — mandatory ECDH decryption + server-verified PoW
-const handleAttest = createDecryptHandler(sessionStore, (telemetry, req, res, headerCheck, session) => {
-  const key = maskIP(getClientIP(req));
-  const result = adaptive.assess(telemetry, req, headerCheck, session, rateLimiter.penalty(key));
-  if (result.status === "passed") rateLimiter.success(key);
+const handleAttest = createDecryptHandler(sessionStore, async (telemetry, req, res, headerCheck, session) => {
+  const key = getClientIP(req);
+  const result = await adaptive.assess(telemetry, req, headerCheck, session, await rateLimiter.penalty(key));
+  if (result.status === "passed") await rateLimiter.success(key);
   return json(res, 200, result);
-}, (req) => rateLimiter.failure(maskIP(getClientIP(req))));
+}, (req) => rateLimiter.failure(getClientIP(req)));
 
 async function handleChallenge(req, res) {
   try {
     const body = JSON.parse((await readBody(req)).toString("utf8"));
-    const result = adaptive.verify(body, req);
-    rateLimiter.success(maskIP(getClientIP(req)));
+    const result = await adaptive.verify(body, req);
+    await rateLimiter.success(getClientIP(req));
     return json(res, 200, result);
   } catch (_) {
-    rateLimiter.failure(maskIP(getClientIP(req)));
+    await rateLimiter.failure(getClientIP(req));
     return json(res, 403, { status: "failed", error: "Challenge failed or expired. Start again." });
   }
 }
@@ -122,19 +124,23 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = req.url?.split("?")[0];
-  if (["/collector.js", "/attest", "/attest/verify-challenge"].includes(url)) {
-    const limit = rateLimiter.check(maskIP(getClientIP(req)));
+  try {
+  if (["/collector.js", "/attest", "/attest/verify-challenge"].includes(url) || url?.startsWith("/passkeys/")) {
+    const limit = await rateLimiter.check(getClientIP(req));
     if (!limit.allowed) {
       res.setHeader("Retry-After", String(limit.retryAfter));
       return json(res, 429, { error: "Too many requests" });
     }
   }
 
-  try {
-    if (url === "/collector.js" && req.method === "GET") return collectorMiddleware(req, res);
-    if (url === "/attest/verify-challenge" && req.method === "POST") return handleChallenge(req, res);
-    if (url === "/attest" && req.method === "POST") return handleAttest(req, res);
-    if (url === "/verify" && req.method === "POST") return handleVerify(req, res);
+    if (passkeys && url?.startsWith("/passkeys/") && req.method === "POST") {
+      try { return json(res,200,await passkeys.handle(url.slice(10),JSON.parse((await readBody(req)).toString("utf8")),req)); }
+      catch { return json(res,403,{error:"Passkey request failed"}); }
+    }
+    if (url === "/collector.js" && req.method === "GET") return await collectorMiddleware(req, res);
+    if (url === "/attest/verify-challenge" && req.method === "POST") return await handleChallenge(req, res);
+    if (url === "/attest" && req.method === "POST") return await handleAttest(req, res);
+
     if (url === "/pubkey" && req.method === "GET")  return handlePubkey(req, res);
     if (url === "/health" && req.method === "GET")  return handleHealth(req, res);
 

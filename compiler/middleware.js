@@ -19,7 +19,7 @@
 
 const { extractHeaderProfile, verifyHeaderConsistency } = require("../attestation/header_check");
 const http = require("node:http");
-const { compile } = require("./pipeline");
+const { compileAsync } = require("./compile_async");
 const { decryptTelemetry } = require("./ecdh_session");
 const { generateChallenge, verifyPoW } = require("../pow_verifier");
 const { maskIP, getClientIP } = require("../attestation/ip_mask");
@@ -56,15 +56,16 @@ class SessionStore {
   }
   canAccept(subnet) {
     this.prune();
-    return this._map.size < this._maxSize && (this._subnets.get(subnet) || 0) < this._maxPerSubnet;
+    return (this._subnets.get(subnet) || 0) < this._maxPerSubnet;
   }
 
   /** Store a session's ECDH key pair and PoW challenge. */
   set(sessionId, data) {
     const entry = (data && data.keyPair) ? data : { keyPair: data };
-    const ipSubnet = entry.ipSubnet || maskIP(entry.headerProfile?.clientIP);
+    const ipSubnet = entry.ipSubnet || entry.headerProfile?.clientIP || "unknown";
     this.remove(sessionId);
     if (!this.canAccept(ipSubnet)) return false;
+    if (this._map.size >= this._maxSize) this.remove(this._map.keys().next().value);
     this._map.set(sessionId, {
       ...entry,
       ipSubnet,
@@ -110,15 +111,15 @@ function createMiddleware(opts = {}) {
     sessionStore   = new SessionStore(),
   } = opts;
 
-  function handler(req, res, next) {
+  async function handler(req, res, next) {
     try {
-      if (!sessionStore.canAccept(maskIP(getClientIP(req)))) {
+      if (!await sessionStore.canAccept(getClientIP(req))) {
         res.writeHead(429, { "Retry-After": "60" }); return res.end("Session capacity reached");
       }
       const { challenge, issuedAt } = generateChallenge();
       const difficulty = 16;
 
-      const { bundle, buildId, ecdhKeyPair, stats, expectedVmState } = compile({
+      const { bundle, buildId, ecdhKeyPair, stats, expectedVmState } = await compileAsync({
         attestEndpoint,
         deadCodeBlocks,
         powChallenge: challenge,
@@ -127,12 +128,13 @@ function createMiddleware(opts = {}) {
 
       // Store session for later telemetry decryption and PoW verification.
       if (ecdhKeyPair) {
-        sessionStore.set(ecdhKeyPair.id, {
+        const stored = await sessionStore.set(ecdhKeyPair.id, {
           keyPair: ecdhKeyPair,
           expectedVmState,
           headerProfile: extractHeaderProfile(req),
           pow: { challenge, difficulty, issuedAt },
         });
+        if (!stored) { res.writeHead(429); return res.end("Session capacity reached"); }
       }
 
       // Strict no-cache, no-store.
@@ -155,7 +157,7 @@ function createMiddleware(opts = {}) {
     } catch (err) {
       console.error("[compiler] compilation failed:", err);
       if (typeof next === "function") return next(err);
-      res.writeHead(500, { "Content-Type": "application/json" });
+      res.writeHead(err.status || 500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "compilation failed" }));
     }
   }
@@ -205,14 +207,12 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
 
       // Mandatory ECDH — reject plaintext or missing crypto envelope
       if (!body || !body.cpk || !body.iv || !body.ct || !body.sid) {
-        onFailure(req);
         res.writeHead(403, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "missing or invalid encrypted payload envelope" }));
       }
 
-      const session = sessionStore.consume(body.sid);
+      const session = await sessionStore.consume(body.sid);
       if (!session) {
-        onFailure(req);
         res.writeHead(403, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "unknown or expired session" }));
       }
@@ -221,7 +221,7 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
       const currentProfile = extractHeaderProfile(req);
       if (session.headerProfile && ["origin", "host"].some(field =>
           session.headerProfile[field] !== currentProfile[field])) {
-        onFailure(req); res.writeHead(403, { "Content-Type": "application/json" });
+        await onFailure(req); res.writeHead(403, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ error: "Session origin mismatch" }));
       }
       const plaintext = decryptTelemetry(body, keyPair.privateKey, session.expectedVmState);
@@ -244,7 +244,7 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
       }
 
       // Overwrite client-reported PoW with server's verification
-      if (!powVerification.valid) onFailure(req);
+      if (!powVerification.valid) await onFailure(req);
       plaintext.pow = {
         serverVerified: powVerification.valid,
         difficulty: expectedDifficulty,
@@ -253,11 +253,11 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
         reason: powVerification.reason,
       };
 
-      return onTelemetry(plaintext, req, res,
+      return await onTelemetry(plaintext, req, res,
         verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext),
         { ...session, sessionId: body.sid, clientPublicKey: body.cpk });
     } catch (err) {
-      onFailure(req);
+      await onFailure(req);
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "invalid payload" }));
@@ -270,54 +270,7 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
 /* ------------------------------------------------------------------ */
 
 if (require.main === module) {
-  const PORT = parseInt(process.argv[2], 10) || 3200;
-
-  const collectorMiddleware = createMiddleware();
-
-  // Wire up the attestation endpoint.
-  const decryptHandler = createDecryptHandler(
-    collectorMiddleware.sessionStore,
-    (telemetry, _req, res) => {
-      // In production, pipe through scorer + token issuer here.
-      console.log("[attest] received telemetry:", JSON.stringify(telemetry).slice(0, 200));
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ received: true, keys: Object.keys(telemetry) }));
-    },
-  );
-
-  const server = http.createServer((req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-    if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
-
-    const url = req.url?.split("?")[0];
-
-    if (url === "/collector.js" && req.method === "GET") {
-      return collectorMiddleware(req, res);
-    }
-    if (url === "/attest" && req.method === "POST") {
-      return decryptHandler(req, res);
-    }
-    if (url === "/" && req.method === "GET") {
-      res.writeHead(200, { "Content-Type": "text/html" });
-      return res.end(`<!DOCTYPE html><html><head><title>PolyMorph Demo</title></head>
-<body><h3>Polymorphic Collector Demo</h3>
-<p>Open DevTools Network tab, then reload to see a unique bundle each time.</p>
-<script src="/collector.js"><\/script></body></html>`);
-    }
-
-    res.writeHead(404);
-    res.end("not found");
-  });
-
-  server.listen(PORT, () => {
-    console.log(`[compiler] polymorphic server on :${PORT}`);
-    console.log(`  GET  /collector.js  — unique obfuscated bundle per request`);
-    console.log(`  POST /attest        — ECDH-decrypted telemetry receiver`);
-    console.log(`  GET  /              — demo page`);
-  });
+  require("../attestation/server").createServer().listen(parseInt(process.argv[2], 10) || 3200);
 }
 
 /* ------------------------------------------------------------------ */

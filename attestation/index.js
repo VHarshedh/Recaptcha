@@ -73,3 +73,5 @@ module.exports = {
     ALPHABET: visual.ALPHABET,
   },
 };
+
+Object.assign(module.exports, { verifyTokenAsync: require("./verifier").verifyTokenAsync, Passkeys: require("./passkeys").Passkeys, createRedisDeployment: require("./deployment").createRedisDeployment });

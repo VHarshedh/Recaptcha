@@ -104,31 +104,11 @@ function openVisualChallenge(instructions, ttl) {
       "totalTypingMs": firstKey === null || lastUp === null ? 0 : lastUp - firstKey,
       "dwellVariance": variance(dwells), "intervalVariance": variance(intervals) };
   }
-  var ctx, shapes;
-  try {
-    ctx = canvas["getContext"]("2d");
-    if (!ctx) throw new Error("Canvas unavailable");
-    shapes = instructions["paths"]["map"](function(shape) { return { "path": new Path2D(shape["d"]), "style": shape }; });
-  } catch (error) { destroy(); throw error; }
-  var seed = instructions["noise"]["seed"];
-  var layer = 0;
-  function randomNoise() { seed = (Math.imul(seed, 1664525) + 1013904223) | 0; return (seed >>> 0) / 4294967296; }
-  function paint() {
-    ctx["globalAlpha"] = 1; ctx["fillStyle"] = instructions["background"]; ctx["fillRect"](0, 0, canvas["width"], canvas["height"]);
-    shapes["forEach"](function(shape) {
-      if (shape["style"]["layer"] !== layer) return;
-      ctx["fillStyle"] = shape["style"]["color"];
-      var offset = instructions["noise"]["layerOffsets"][layer];
-      ctx["save"](); ctx["translate"](offset[0] + (randomNoise() - 0.5) * 0.8, offset[1] + (randomNoise() - 0.5) * 0.8);
-      ctx["fill"](shape["path"]); ctx["restore"]();
-    });
-    layer = (layer + 1) % 3;
-    ctx["globalAlpha"] = instructions["noise"]["opacity"];
-    for (var particle = 0; particle < instructions["noise"]["particles"]; particle++) {
-      ctx["fillStyle"] = instructions["palette"][Math.floor(randomNoise() * instructions["palette"]["length"])];
-      ctx["fillRect"](randomNoise() * canvas["width"], randomNoise() * canvas["height"], 1 + randomNoise() * 3, 1 + randomNoise() * 3);
-    }
-  }
+  var ctx = canvas["getContext"]("2d");
+  var picture = new Image();
+  picture["onload"] = function() { if (ctx) ctx["drawImage"](picture, 0, 0); };
+  picture["src"] = instructions["image"];
+  function paint() {}
   function destroy() {
     eventTypes["forEach"](function(type) { shadow["removeEventListener"](type, track, true); });
     clearInterval(frameTimer); clearTimeout(expiryTimer); host["remove"]();
@@ -155,7 +135,7 @@ function openVisualChallenge(instructions, ttl) {
   });
   try {
     paint();
-    frameTimer = setInterval(paint, 1000 / 60);
+
     input["focus"]();
   } catch (error) { answer["catch"](function() {}); destroy(); throw error; }
   return { "answer": answer, "destroy": destroy, "telemetry": telemetry };

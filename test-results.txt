@@ -1,0 +1,20 @@
+
+> recaptcha-attestation@1.0.0 test
+> node test_all.js
+
+════════════════════════════════════════════════════════════
+  Recaptcha Attestation Suite — Running All Test Suites
+════════════════════════════════════════════════════════════
+
+▶ Running Modular Exports Verification... ✓ PASSED (474 ms)
+▶ Running Compiler Suite... ✓ PASSED (346 ms)
+▶ Running Attestation Suite... ✓ PASSED (84 ms)
+▶ Running PoW Verifier Suite... ✓ PASSED (75 ms)
+▶ Running PoW Inline Worker Suite... ✓ PASSED (130 ms)
+▶ Running E2E Crypto & Scoring Suite... ✓ PASSED (83 ms)
+▶ Running Adaptive Challenge & Step-Up Suite... ✓ PASSED (965 ms)
+▶ Running Security & Anti-Spoofing Regressions... ✓ PASSED (1640 ms)
+
+════════════════════════════════════════════════════════════
+Summary: 8 passed, 0 failed (Total: 3.80s)
+════════════════════════════════════════════════════════════

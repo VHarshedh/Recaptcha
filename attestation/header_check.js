@@ -41,7 +41,7 @@ function verifyHeaderConsistency(initial, current, telemetry) {
   if (!error) note("missing_receiver_error", 0.1);
   if (chromium) {
     if (!current.secChUa || !current.secChUaPlatform || !current.secChUaMobile)
-      note("chrome_ua_missing_client_hints", 0.6);
+      note("chrome_ua_missing_client_hints", 0.25);
     if (error !== "TypeError: Illegal invocation")
       note("chrome_ua_non_v8_receiver_error", 0.8);
   }

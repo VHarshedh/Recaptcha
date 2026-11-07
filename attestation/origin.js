@@ -9,7 +9,10 @@ function normalizeOrigin(value) {
 }
 function requestHostOrigin(req) {
   const host = req.headers?.host;
-  return typeof host === "string" ? normalizeOrigin((req.socket?.encrypted ? "https://" : "http://") + host) : "";
+  const forwarded = req.headers?.["x-forwarded-proto"];
+  if (process.env.TRUST_PROXY === "1" && forwarded !== undefined && !["http", "https"].includes(forwarded)) return "";
+  const secure = process.env.TRUST_PROXY === "1" && forwarded !== undefined ? forwarded === "https" : req.socket?.encrypted;
+  return typeof host === "string" ? normalizeOrigin((secure ? "https://" : "http://") + host) : "";
 }
 function requestOrigin(req) {
   return req.headers?.origin === undefined ? requestHostOrigin(req) : normalizeOrigin(req.headers.origin);

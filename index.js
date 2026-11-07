@@ -40,3 +40,5 @@ module.exports = {
   verifyPoW: pow.verifyPoW,
   solvePoW: pow.solvePoW,
 };
+
+Object.assign(module.exports, { verifyTokenAsync: attestation.verifyTokenAsync, Passkeys: attestation.Passkeys, createRedisDeployment: attestation.createRedisDeployment });

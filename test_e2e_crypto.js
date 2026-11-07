@@ -148,7 +148,7 @@ async function run() {
   const tokenResult = issueToken({
     score: scoreResult.score,
     action: decrypted.action,
-    ipSubnet,
+    ipSubnet, origin: "https://example.test", host: "https://example.test",
   });
   console.log("7. Ed25519 Token issued:");
   console.log("   Token length:", tokenResult.token.length);
@@ -157,7 +157,7 @@ async function run() {
   const verifyResult = verifyToken(tokenResult.token, {
     clientIP,
     action: "login",
-    minScore: 0.6,
+    minScore: 0.70, origin: "https://example.test", host: "https://example.test",
   });
 
   console.log("8. Verification result:");

@@ -64,7 +64,15 @@ const CLOCK_SKEW_S = 5;
  *
  * @returns {VerifyResult}
  */
+const SHARED_CHECK = Symbol("shared replay verification");
 function verifyToken(token, opts = {}) {
+  if (process.env.NODE_ENV === "production" && process.env.ATTESTATION_STATE_MODE !== "single-process" && opts[SHARED_CHECK] !== true)
+    return fail("Local replay cache requires explicit single-process deployment");
+  for (const field of ["action", "origin", "host", "clientIP"]) {
+    if (typeof opts[field] !== "string" || !opts[field]) return fail("expected " + field + " required");
+  }
+  opts = { ...opts, minScore: opts.minScore === undefined ? 0.70 : opts.minScore };
+  if (!Number.isFinite(opts.minScore) || opts.minScore < 0.70 || opts.minScore > 1) return fail("invalid minimum score");
   // ── Structural parse ──────────────────────────────────────────────
   if (typeof token !== "string") {
     return fail("token must be a string");
@@ -84,8 +92,8 @@ function verifyToken(token, opts = {}) {
   } catch {
     return fail("malformed header");
   }
-  if (header.alg !== "EdDSA") {
-    return fail(`unsupported algorithm: ${header.alg}`);
+  if (!header || header.alg !== "EdDSA") {
+    return fail(`unsupported algorithm: ${header?.alg}`);
   }
 
   // ── Verify signature FIRST (before trusting any claim) ────────────
@@ -111,7 +119,7 @@ function verifyToken(token, opts = {}) {
   }
 
   // ── Required fields ───────────────────────────────────────────────
-  if (typeof claims.score !== "number" || !Number.isFinite(claims.score)) {
+  if (!claims || typeof claims.score !== "number" || !Number.isFinite(claims.score)) {
     return fail("missing or invalid score");
   }
   if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp)) {
@@ -157,13 +165,6 @@ function verifyToken(token, opts = {}) {
   if (claims.host && typeof opts.host !== "string") return fail("expected host required");
   if (typeof opts.host === "string" && claims.host !== opts.host) return fail("host mismatch");
 
-  // ── Nonce replay protection ───────────────────────────────────────
-  if (opts.skipNonce !== true) {
-    if (!nonceCache.claim(claims.nonce)) {
-      return fail("nonce already used (replay detected)");
-    }
-  }
-
   // ── Action binding ────────────────────────────────────────────────
   if (typeof opts.action === "string" && claims.action !== opts.action) {
     return fail(`action mismatch: expected "${opts.action}", got "${claims.action}"`);
@@ -173,8 +174,8 @@ function verifyToken(token, opts = {}) {
   if (typeof opts.clientIP === "string") {
     const expectedSubnet = maskIP(opts.clientIP);
     if (
-      claims.ip_subnet !== "unknown" &&
-      expectedSubnet !== "unknown" &&
+      claims.ip_subnet === "unknown" ||
+      expectedSubnet === "unknown" ||
       claims.ip_subnet !== expectedSubnet
     ) {
       return fail(
@@ -186,6 +187,14 @@ function verifyToken(token, opts = {}) {
   // ── Score threshold ───────────────────────────────────────────────
   if (typeof opts.minScore === "number" && claims.score < opts.minScore) {
     return fail(`score ${claims.score} below threshold ${opts.minScore}`);
+  }
+
+  // ── Nonce replay protection ───────────────────────────────────────
+  if (opts.skipNonce === true && process.env.NODE_ENV === "production" && opts[SHARED_CHECK] !== true) return fail("Cannot skip production replay protection");
+  if (opts.skipNonce !== true) {
+    if (!nonceCache.claim(claims.nonce)) {
+      return fail("nonce already used (replay detected)");
+    }
   }
 
   return { valid: true, claims };
@@ -208,10 +217,20 @@ function verifyToken(token, opts = {}) {
  *
  * @returns {Function} middleware(req, res, next)
  */
+async function verifyTokenAsync(token, opts = {}) {
+  if (!opts.nonceStore || typeof opts.nonceStore.claim !== "function") return fail("Shared nonce store required");
+  const result = verifyToken(token, { ...opts, skipNonce: true, [SHARED_CHECK]: true });
+  if (!result.valid) return result;
+  try {
+    if (!await opts.nonceStore.claim(result.claims.nonce, 120000)) return fail("nonce already used (replay detected)");
+    return result;
+  } catch { return fail("Replay store unavailable"); }
+}
+
 function attestationMiddleware(opts = {}) {
   const {
     action,
-    minScore = 0.5,
+    minScore = 0.70,
     header: customHeader = "x-attestation-token",
   } = opts;
 
@@ -234,8 +253,10 @@ function attestationMiddleware(opts = {}) {
     // Determine client IP (respects X-Forwarded-For for reverse proxies).
     const clientIP = getClientIP(req);
 
-    const result = verifyToken(token, { clientIP, action, minScore, origin: opts.origin || requestOrigin(req), host: opts.host || requestHostOrigin(req) });
+    const verify = opts.nonceStore ? verifyTokenAsync : verifyToken;
+    const checked = verify(token, { clientIP, action, minScore, nonceStore: opts.nonceStore, origin: opts.origin || requestOrigin(req), host: opts.host || requestHostOrigin(req) });
 
+    const finish = result => {
     if (!result.valid) {
       return sendJSON(res, 403, {
         error: "attestation failed",
@@ -246,6 +267,8 @@ function attestationMiddleware(opts = {}) {
     // Attach verified claims to the request object.
     req.attestation = result.claims;
     next();
+    };
+    return checked && typeof checked.then === "function" ? checked.then(finish) : finish(checked);
   };
 }
 
@@ -284,6 +307,7 @@ function sendJSON(res, status, body) {
 
 module.exports = {
   verifyToken,
+  verifyTokenAsync,
   attestationMiddleware,
   nonceCache, // exported for testing / manual cache management
   CLOCK_SKEW_S,

@@ -72,13 +72,13 @@ assert(unescapeJS("\\u0041") === "A", "unescape \\uNNNN");
   const original = "testString123!@#";
   const encrypted = xorEncrypt(original, key);
   assert(typeof encrypted === "string", "xorEncrypt returns string");
-  assert(encrypted.length === original.length * 2, "hex length = 2 * char count");
+  assert(encrypted.length === original.length * 4, "hex length = 4 * char count");
 
   // Decrypt manually
   let decrypted = "";
-  for (let j = 0; j < encrypted.length; j += 2) {
+  for (let j = 0; j < encrypted.length; j += 4) {
     decrypted += String.fromCharCode(
-      parseInt(encrypted.substr(j, 2), 16) ^ key[(j / 2) % key.length]
+      parseInt(encrypted.substr(j, 4), 16) ^ key[(j / 4) % key.length]
     );
   }
   assert(decrypted === original, "XOR round-trip preserves original");

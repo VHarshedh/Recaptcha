@@ -45,8 +45,12 @@ const SOURCE_LIST = [
 /** Strip "use strict" directives, comments, and transform UMD wrappers. */
 function preprocess(src) {
   // Protect literals while removing comments; preserve source-text canaries.
-  let out = src.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\/\*[\s\S]*?\*\/|^\s*\/\/[^\r\n]*)/gm,
-    (match, literal) => literal || (match.includes("runtime_integrity_source_canary") ? match : " "));
+  const comments = [];
+  require("acorn").parse(src, { ecmaVersion: "latest", onComment: (_block, text, start, end) => {
+    if (!text.includes("runtime_integrity_source_canary")) comments.push({ start, end });
+  } });
+  let out = src;
+  for (const comment of comments.reverse()) out = out.slice(0, comment.start) + " " + out.slice(comment.end);
   out = out.replace(/^\s*["']use strict["'];?\s*$/gm, "");
 
   // Transform UMD wrapper to direct IIFE assignment to globalThis and local var
@@ -55,8 +59,7 @@ function preprocess(src) {
   if (match) {
     const modName = match[1];
     const body = match[2];
-    out = `var ${modName} = (function (root) {${body}})(typeof globalThis === 'object' ? globalThis : this);\n` +
-          `(typeof globalThis === 'object' ? globalThis : this)["${modName}"] = ${modName};\n`;
+    out = `var ${modName} = (function (root) {${body}})(typeof globalThis === 'object' ? globalThis : this);\n`;
   }
 
   return out;
@@ -147,7 +150,7 @@ function canvasInvariant() {
   context["fillRect"](0, 0, 1, 1);
   return Math["imul"](probe["width"], probe["height"]) ^ challengeProgram[5][0];
 }
-var ${names.kinRef} = (typeof globalThis !== "undefined" && globalThis["Kinematics"]) || (typeof window !== "undefined" && window["Kinematics"]) || (typeof Kinematics !== "undefined" ? Kinematics : null);
+var ${names.kinRef} = Kinematics;
 if (${names.kinRef} && typeof ${names.kinRef}["start"] === "function") {
   ${names.kinRef}["start"]();
 }
@@ -165,20 +168,20 @@ async function ${names.mainFn}(${names.actionParam}) {
   while (${names.state} !== ${SENTINEL}) {
     switch (${names.state}) {
       case ${cv[0]}:
-        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[1](), (invariantHash(typeof globalThis["RuntimeIntegrity"]["collect"]) ^ invariantHash(Object["prototype"]["toString"]["call"](window["navigator"]))) ^ executeProgram(challengeProgram, 0));
-        var ${names.rtRef} = (typeof globalThis !== "undefined" && globalThis["RuntimeIntegrity"]) || (typeof window !== "undefined" && window["RuntimeIntegrity"]) || (typeof RuntimeIntegrity !== "undefined" ? RuntimeIntegrity : null);
+        ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[1](), (invariantHash(typeof RuntimeIntegrity["collect"]) ^ invariantHash(Object["prototype"]["toString"]["call"](window["navigator"]))) ^ executeProgram(challengeProgram, 0));
+        var ${names.rtRef} = RuntimeIntegrity;
         ${names.collector}["runtime"] = (${names.rtRef} && typeof ${names.rtRef}["collect"] === "function") ? ${names.rtRef}["collect"]() : {};
         ${names.state} = ${cv[1]};
         break;
       case ${cv[1]}:
         ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[2](), ((Function["prototype"]["toString"]["call"](Function["prototype"]["toString"])["includes"]("[native code]") ? 1 : 0)) ^ executeProgram(challengeProgram, 1));
-        var ${names.hwRef} = (typeof globalThis !== "undefined" && globalThis["HardwareConsistency"]) || (typeof window !== "undefined" && window["HardwareConsistency"]) || (typeof HardwareConsistency !== "undefined" ? HardwareConsistency : null);
+        var ${names.hwRef} = HardwareConsistency;
         ${names.collector}["hardware"] = (${names.hwRef} && typeof ${names.hwRef}["collect"] === "function") ? await ${names.hwRef}["collect"]() : {};
         ${names.state} = ${cv[2]};
         break;
       case ${cv[2]}:
         ${names.vmState} = mixRuntimeState(${names.vmState}, stateSlots[3](), (executionCanary() ^ canvasInvariant()) ^ executeProgram(challengeProgram, 2));
-        var ${names.kinSnap} = (typeof globalThis !== "undefined" && globalThis["Kinematics"]) || (typeof window !== "undefined" && window["Kinematics"]) || (typeof Kinematics !== "undefined" ? Kinematics : null);
+        var ${names.kinSnap} = Kinematics;
         ${names.collector}["kinematics"] = (${names.kinSnap} && typeof ${names.kinSnap}["getBiometricVector"] === "function") ? ${names.kinSnap}["getBiometricVector"]() : {};
         ${names.state} = ${cv[3]};
         break;

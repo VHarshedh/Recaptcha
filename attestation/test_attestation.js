@@ -145,7 +145,7 @@ console.log("\n══ token.js ══");
 const { issueToken, MIN_TTL_S, MAX_TTL_S } = require("./token");
 
 {
-  const { token, claims } = issueToken({
+  const { token, claims } = issueToken({ origin: "https://example.test", host: "https://example.test",
     score: 0.85,
     action: "login",
     ipSubnet: "192.168.1.0/24",
@@ -163,24 +163,24 @@ const { issueToken, MIN_TTL_S, MAX_TTL_S } = require("./token");
 
 // Score clamping
 {
-  const { claims } = issueToken({ score: 1.5, action: "test", ipSubnet: "x" });
+  const { claims } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 1.5, action: "test", ipSubnet: "10.0.0.0/24" });
   assert(claims.score <= 1.0, "score clamped to max 1.0");
 }
 {
-  const { claims } = issueToken({ score: -0.5, action: "test", ipSubnet: "x" });
+  const { claims } = issueToken({ origin: "https://example.test", host: "https://example.test", score: -0.5, action: "test", ipSubnet: "10.0.0.0/24" });
   assert(claims.score >= 0.0, "score clamped to min 0.0");
 }
 
 // Bad inputs
 {
   let threw = false;
-  try { issueToken({ score: NaN, action: "x", ipSubnet: "x" }); }
+  try { issueToken({ origin: "https://example.test", host: "https://example.test", score: NaN, action: "x", ipSubnet: "10.0.0.0/24" }); }
   catch { threw = true; }
   assert(threw, "NaN score throws");
 }
 {
   let threw = false;
-  try { issueToken({ score: 0.5, action: "", ipSubnet: "x" }); }
+  try { issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "", ipSubnet: "10.0.0.0/24" }); }
   catch { threw = true; }
   assert(threw, "empty action throws");
 }
@@ -189,11 +189,13 @@ const { issueToken, MIN_TTL_S, MAX_TTL_S } = require("./token");
 console.log("\n══ verifier.js ══");
 /* ================================================================== */
 
-const { verifyToken, nonceCache: verifierCache } = require("./verifier");
+const { verifyToken: verifyStrict, nonceCache: verifierCache } = require("./verifier");
+
+const verifyToken = (token, opts = {}) => verifyStrict(token, { action: "test", clientIP: "10.0.0.1", origin: "https://example.test", host: "https://example.test", ...opts });
 
 // Valid token round-trip
 {
-  const { token } = issueToken({ score: 0.9, action: "checkout", ipSubnet: "10.0.0.0/24" });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.9, action: "checkout", ipSubnet: "10.0.0.0/24" });
   const result = verifyToken(token, {
     clientIP: "10.0.0.42",
     action: "checkout",
@@ -206,7 +208,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 
 // Tampered token
 {
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "x" });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24" });
   const tampered = token.slice(0, -4) + "ZZZZ";
   const result = verifyToken(tampered, { skipNonce: true });
   assert(result.valid === false, "tampered token rejected");
@@ -216,7 +218,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 // Expired token
 {
   const pastMs = Date.now() - 120_000; // 2 minutes ago
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "x", nowMs: pastMs });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24", nowMs: pastMs });
   const result = verifyToken(token, { skipNonce: true });
   assert(result.valid === false, "expired token rejected");
   assert(result.reason.includes("expired"), "reason: expired");
@@ -225,7 +227,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 // Future-issued token (beyond clock skew)
 {
   const futureMs = Date.now() + 120_000; // 2 minutes in the future
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "x", nowMs: futureMs });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24", nowMs: futureMs });
   const result = verifyToken(token, { skipNonce: true });
   assert(result.valid === false, "future token rejected");
   assert(result.reason.includes("future"), "reason: future");
@@ -233,7 +235,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 
 // Action mismatch
 {
-  const { token } = issueToken({ score: 0.5, action: "login", ipSubnet: "x" });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "login", ipSubnet: "10.0.0.0/24" });
   const result = verifyToken(token, { action: "checkout", skipNonce: true });
   assert(result.valid === false, "action mismatch rejected");
   assert(result.reason.includes("mismatch"), "reason: action mismatch");
@@ -241,7 +243,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 
 // IP subnet mismatch
 {
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "192.168.1.0/24" });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "192.168.1.0/24" });
   const result = verifyToken(token, { clientIP: "10.0.0.1", skipNonce: true });
   assert(result.valid === false, "IP subnet mismatch rejected");
   assert(result.reason.includes("subnet"), "reason: IP subnet mismatch");
@@ -249,15 +251,15 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 
 // Score threshold
 {
-  const { token } = issueToken({ score: 0.3, action: "test", ipSubnet: "x" });
-  const result = verifyToken(token, { minScore: 0.5, skipNonce: true });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.3, action: "test", ipSubnet: "10.0.0.0/24" });
+  const result = verifyToken(token, { minScore: 0.7, skipNonce: true });
   assert(result.valid === false, "below-threshold score rejected");
   assert(result.reason.includes("threshold"), "reason: below threshold");
 }
 
 // Nonce replay
 {
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "x" });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24" });
   const first = verifyToken(token);
   const second = verifyToken(token);
   assert(first.valid === true, "first use of nonce succeeds");
@@ -277,7 +279,7 @@ const { verifyToken, nonceCache: verifierCache } = require("./verifier");
 // Clock skew tolerance (token issued 3 seconds ago, verified "now" — should pass)
 {
   const now = Date.now();
-  const { token } = issueToken({ score: 0.5, action: "test", ipSubnet: "x", nowMs: now });
+  const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24", nowMs: now });
   // Simulate verifier clock being 3 seconds behind.
   const result = verifyToken(token, { nowMs: now - 3000, skipNonce: true });
   assert(result.valid === true, "3s clock skew within tolerance");

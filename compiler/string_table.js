@@ -53,21 +53,11 @@ const STRING_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
  * @returns {string[]}
  */
 function extractStrings(source) {
-  const seen = new Set();
-  const result = [];
-  let m;
-  while ((m = STRING_RE.exec(source)) !== null) {
-    const raw = m[0];
-    const inner = raw.slice(1, -1);
-    if (inner.length === 0) continue;           // skip empty strings
-    const value = unescapeJS(inner);
-    if (value === "use strict") continue;        // preserve directives
-    if (!seen.has(value)) {
-      seen.add(value);
-      result.push(value);
-    }
-  }
-  return result;
+  const values = new Set();
+  require("acorn-walk").simple(require("acorn").parse(source, { ecmaVersion: "latest" }), {
+    Literal(node) { if (typeof node.value === "string" && node.value && node.value !== "use strict") values.add(node.value); }
+  });
+  return [...values];
 }
 
 /* ------------------------------------------------------------------ */
@@ -95,13 +85,8 @@ function xorEncrypt(str, keyBytes) {
   const parts = [];
   for (let i = 0; i < str.length; i++) {
     const code = str.charCodeAt(i);
-    if (code > 127) {
-      throw new RangeError(
-        `Non-ASCII char U+${code.toString(16).toUpperCase()} at pos ${i} — ` +
-        `source modules must use ASCII-only strings`
-      );
-    }
-    parts.push((code ^ keyBytes[i % keyBytes.length]).toString(16).padStart(2, "0"));
+
+    parts.push((code ^ keyBytes[i % keyBytes.length]).toString(16).padStart(4, "0"));
   }
   return parts.join("");
 }
@@ -142,8 +127,8 @@ function generateDecoderSource(tableName, keyName, decoderName, encrypted, keyBy
     `var ${keyName}=[${kEntries}];` +
     `function ${decoderName}(i){` +
       `var e=${tableName}[i],r="";` +
-      `for(var j=0;j<e.length;j+=2){` +
-        `r+=String.fromCharCode(parseInt(e.substr(j,2),16)^${keyName}[(j/2)%${keyName}.length]);` +
+      `for(var j=0;j<e.length;j+=4){` +
+        `r+=String.fromCharCode(parseInt(e.substr(j,4),16)^${keyName}[(j/4)%${keyName}.length]);` +
       `}` +
       `return r;` +
     `}`
@@ -165,37 +150,19 @@ function generateDecoderSource(tableName, keyName, decoderName, encrypted, keyBy
  * @returns {string}
  */
 function replaceStrings(source, strings, decoderName) {
-  // Map from unescaped value → table index
-  const indexMap = new Map();
-  strings.forEach((s, i) => indexMap.set(s, i));
-
-  return source.replace(STRING_RE, (match, offset) => {
-    const inner = match.slice(1, -1);
-    if (inner.length === 0) return match;
-    const value = unescapeJS(inner);
-    if (value === "use strict") return match;
-    if (!indexMap.has(value)) return match;
-
-    const call = `${decoderName}(${indexMap.get(value)})`;
-
-    // Check if this string literal is an object key:
-    // skip whitespace after the match and see if the next char is `:` (but not `::`)
-    const after = source.substring(offset + match.length);
-    const colonMatch = after.match(/^\s*:/);
-    if (colonMatch) {
-      // Also check it's not a ternary — look behind for `?` on the same expression.
-      // A simple heuristic: if the char before the string (ignoring whitespace) is
-      // `,`, `{`, or start-of-line, it's likely an object key.
-      const before = source.substring(Math.max(0, offset - 20), offset);
-      const trimBefore = before.replace(/\s+$/, "");
-      const lastChar = trimBefore[trimBefore.length - 1];
-      if (lastChar === "{" || lastChar === "," || lastChar === "(" || offset === 0) {
-        return `[${call}]`;
-      }
+  const edits = [];
+  require("acorn-walk").ancestor(require("acorn").parse(source, { ecmaVersion: "latest" }), {
+    Literal(node, ancestors) {
+      if (typeof node.value !== "string" || node.value === "use strict") return;
+      const index = strings.indexOf(node.value); if (index < 0) return;
+      const parent = ancestors[ancestors.length - 2];
+      let value = decoderName + "(" + index + ")";
+      if ((parent.type === "Property" || parent.type === "MethodDefinition") && parent.key === node && !parent.computed) value = "[" + value + "]";
+      edits.push({ start: node.start, end: node.end, value });
     }
-
-    return call;
   });
+  for (const edit of edits.sort((a,b) => b.start - a.start)) source = source.slice(0,edit.start) + edit.value + source.slice(edit.end);
+  return source;
 }
 
 /* ------------------------------------------------------------------ */
