@@ -245,7 +245,11 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
       }
 
       // Overwrite client-reported PoW with server's verification
-      if (!powVerification.valid) await onFailure(req);
+      if (!powVerification.valid) {
+        await onFailure(req);
+        res.writeHead(403, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "Invalid or expired proof of work" }));
+      }
       plaintext.pow = {
         serverVerified: powVerification.valid,
         difficulty: expectedDifficulty,

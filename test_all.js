@@ -17,6 +17,8 @@ const path = require("node:path");
 const ROOT_DIR = __dirname;
 
 const TEST_SUITES = [
+  { name: "Puzzle Work Gate", file: "test_puzzle_gate.js" },
+  { name: "Demo Token Isolation", file: "test_demo_tokens.js" },
   { name: "Nonce Rotation Replay Regression", file: "test_nonce_rotation.js" },
   { name: "Hardening regressions", file: "test_hardening.js" },
   { name: "Boundary Security Regressions", file: "test_boundary_security.js" },

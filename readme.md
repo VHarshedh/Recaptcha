@@ -188,3 +188,36 @@ development, signed cross-origin responses, and removal of an in-flight action.
 These controls do not prove humanity or prevent an enrolled account from using
 automation. Trusted enrollment, account authorization/revocation, application
 session security, and distributed abuse limits remain deployment responsibilities.
+
+## Puzzle work gate and demo-token isolation
+
+`POST /attest` now requires a valid, fresh solution to its own server-issued
+initial PoW before invoking scoring or generating a visual/PoW step-up. Missing,
+wrong, expired, or unrelated work receives HTTP 403 and consumes the session.
+Client-reported difficulty and `serverVerified` flags cannot satisfy this gate.
+This adds a work cost; it does not make the public puzzle impossible for bots.
+
+All newly issued tokens carry a signed boolean `demo` claim. Adaptive issuance
+without an independent authorization callback marks tokens `demo: true`, including
+high-telemetry scores and successful visual/PoW challenges. Normal verification,
+shared-store verification and relying-party middleware reject these tokens.
+Explicit `allowInsecureDemo: true` on the direct verifier permits local testing
+only; production verification always rejects demo tokens. Do not use that test
+option for protected application routes. Demo mode must be enabled with the
+boolean `true`, not a truthy configuration string.
+
+Tokens missing the new claim are rejected, since old tokens cannot distinguish
+puzzle-only issuance from independent authorization. Coordinate issuer/verifier
+upgrades: stop old issuance, drain outstanding tokens (maximum 60-second TTL plus
+5 seconds of verifier skew), then switch all replicas together. Clients with
+outstanding tokens must obtain new ones. Custom issuers calling `issueToken`
+remain trusted server code and must only issue `demo: false` after independent
+verification; never expose issuance options to request bodies.
+
+The static glyph font can still be learned by OCR, and the public PoW algorithm
+can be optimized. Encryption delivers the image to the client and does not hide
+it from that client. Typing timings, `isTrusted` summaries, and telemetry are
+client-controlled evidence. Successful puzzle solving therefore cannot replace
+trusted enrollment, passkey verification, or application authorization. This
+change deliberately avoids increasing visual distortion or CPU cost without
+measured human usability and bot-resistance evidence.

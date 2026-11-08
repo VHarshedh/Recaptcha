@@ -17,6 +17,7 @@ const { RateLimiter } = require("./attestation/rate_limiter");
 const { validModalKinematics } = require("./attestation/adaptive_challenge");
 const { createServer } = require("./attestation/server");
 const { maskIP } = require("./attestation/ip_mask");
+const { hashPoW, countLeadingZeroBits } = require("./pow_verifier");
 
 async function main() {
   await hardeningRegressions();
@@ -137,7 +138,11 @@ async function main() {
     const context = vm.createContext({ Uint8Array, Int32Array, Float32Array, ArrayBuffer, DataView, crypto: { subtle, getRandomValues: crypto.webcrypto.getRandomValues.bind(crypto.webcrypto) },
       TextEncoder, atob, btoa, performance, setTimeout, clearTimeout,
       addEventListener() {}, removeEventListener() {},
-      solvePoW: async () => ({ nonce: 0, durationMs: 1 }),
+      solvePoW: async ({challenge,difficulty}) => {
+        let nonce=0;
+        while(countLeadingZeroBits(hashPoW(challenge,nonce)) < difficulty) nonce++;
+        return {nonce,durationMs:1};
+      },
       fetch: async (_url, opts) => { wire = JSON.parse(opts.body); return { ok: true, json: async () => ({ status: "passed", token: "test-token" }) }; } });
     context.window = context;
     context.navigator = { [Symbol.toStringTag]: "Navigator" };

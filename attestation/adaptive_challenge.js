@@ -31,7 +31,7 @@ function encryptRendering(instructions, session) {
 class AdaptiveChallenge {
   constructor(store, { secret = crypto.randomBytes(32), authorize = null, allowInsecureDemo = false, visualFactory = generateVisual,
     powFactory = difficulty => ({ ...generateChallenge(), difficulty }) } = {}) {
-    if ((process.env.NODE_ENV === "production" || !allowInsecureDemo) && typeof authorize !== "function")
+    if ((process.env.NODE_ENV === "production" || allowInsecureDemo !== true) && typeof authorize !== "function")
       throw new Error("Production requires a server-side authorization policy independent of client telemetry");
     this.authorize = authorize;
     this.store = store;
@@ -51,8 +51,8 @@ class AdaptiveChallenge {
     const host = extractHeaderProfile(req).host;
     // A server-authenticated session/passkey policy is also the accessible path.
     if (this.authorize) return { status: "passed", score: 0.70,
-      ...issueToken({ score: 0.70, action, ipSubnet, origin, host }) };
-    if (result.score >= 0.70) return { status: "passed", ...result, ...issueToken({ score: result.score, action, ipSubnet, origin, host }) };
+      ...issueToken({ demo: !this.authorize, score: 0.70, action, ipSubnet, origin, host }) };
+    if (result.score >= 0.70) return { status: "passed", ...result, ...issueToken({ demo: !this.authorize, score: result.score, action, ipSubnet, origin, host }) };
     const challengeId = crypto.randomBytes(16).toString("hex");
     const status = result.score < 0.35 ? "step_up_visual" : "step_up_pow";
     const pow = this.powFactory(reputationPenalty > 0 ? 22 : difficultyForScore(result.score));
@@ -98,7 +98,7 @@ class AdaptiveChallenge {
       throw new Error("Independent verification required");
     // A step-up is a policy override, not evidence that passive telemetry improved.
     return { status: "passed", passiveScore: claims.score, score: 0.70,
-      ...issueToken({ score: 0.70, action: claims.action, ipSubnet: claims.ipSubnet, origin: claims.origin, host: claims.host }) };
+      ...issueToken({ demo: !this.authorize, score: 0.70, action: claims.action, ipSubnet: claims.ipSubnet, origin: claims.origin, host: claims.host }) };
   }
 }
 function validModalKinematics(k) {

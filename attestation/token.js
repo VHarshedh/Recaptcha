@@ -47,7 +47,8 @@ const DEFAULT_TTL_S = 45;
  *
  * @returns {{ token: string, claims: Object }}
  */
-function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = "" }) {
+function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = "", demo = false }) {
+  if (typeof demo !== "boolean") throw new TypeError("Invalid demo marker");
   if (ttlS !== undefined && !Number.isSafeInteger(ttlS)) throw new TypeError("Invalid TTL");
   if (nowMs !== undefined && (!Number.isSafeInteger(nowMs) || nowMs < 0)) throw new TypeError("Invalid clock");
   for (const value of [origin, host])
@@ -77,6 +78,7 @@ function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = 
 
   // ── Build claims ──────────────────────────────────────────────────
   const claims = {
+    demo,
     score,
     origin,
     host,

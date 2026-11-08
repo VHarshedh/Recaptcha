@@ -89,8 +89,10 @@ async function main() {
   }
   function checkToken(result) {
     assert.equal(result.status, "passed");
-    const verified = verifyToken(result.token, { clientIP: "127.0.0.1", action: "login", minScore: 0.70, origin, host: origin });
+    assert.equal(verifyToken(result.token, { clientIP: "127.0.0.1", action: "login", origin, host: origin }).valid, false);
+    const verified = verifyToken(result.token, { allowInsecureDemo: true, clientIP: "127.0.0.1", action: "login", minScore: 0.70, origin, host: origin });
     assert(verified.valid, verified.reason);
+    assert.equal(verified.claims.demo, true);
   }
   try {
     let fx = fixture();

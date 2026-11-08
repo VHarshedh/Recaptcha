@@ -120,6 +120,12 @@ function verifyToken(token, opts = {}) {
     return fail("malformed claims");
   }
 
+  // Puzzle/telemetry demo results are not independent verification. Never
+  // permit them at a production relying party, including with an opt-in flag.
+  if (typeof claims?.demo !== "boolean") return fail("invalid demo marker");
+  if (claims?.demo === true && (opts.allowInsecureDemo !== true || process.env.NODE_ENV === "production"))
+    return fail("Demo puzzle token cannot authorize access");
+
   // ── Required fields ───────────────────────────────────────────────
   if (!claims || typeof claims.score !== "number" || !Number.isFinite(claims.score) || claims.score < 0 || claims.score > 1) {
     return fail("missing or invalid score");
