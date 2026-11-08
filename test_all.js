@@ -17,6 +17,8 @@ const path = require("node:path");
 const ROOT_DIR = __dirname;
 
 const TEST_SUITES = [
+  { name: "Mapped IPv4 Token Binding", file: "test_mapped_ip_binding.js" },
+  { name: "Malformed Token Availability", file: "test_malformed_tokens.js" },
   { name: "Puzzle Work Gate", file: "test_puzzle_gate.js" },
   { name: "Demo Token Isolation", file: "test_demo_tokens.js" },
   { name: "Nonce Rotation Replay Regression", file: "test_nonce_rotation.js" },

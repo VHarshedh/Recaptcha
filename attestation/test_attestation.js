@@ -209,7 +209,11 @@ const verifyToken = (token, opts = {}) => verifyStrict(token, { action: "test", 
 // Tampered token
 {
   const { token } = issueToken({ origin: "https://example.test", host: "https://example.test", score: 0.8, action: "test", ipSubnet: "10.0.0.0/24" });
-  const tampered = token.slice(0, -4) + "ZZZZ";
+  const parts = token.split(".");
+  const signature = Buffer.from(parts[2], "base64url");
+  signature[0] ^= 1;
+  parts[2] = signature.toString("base64url");
+  const tampered = parts.join(".");
   const result = verifyToken(tampered, { skipNonce: true });
   assert(result.valid === false, "tampered token rejected");
   assert(result.reason.includes("signature"), "reason: invalid signature");

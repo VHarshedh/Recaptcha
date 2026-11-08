@@ -221,3 +221,19 @@ client-controlled evidence. Successful puzzle solving therefore cannot replace
 trusted enrollment, passkey verification, or application authorization. This
 change deliberately avoids increasing visual distortion or CPU cost without
 measured human usability and bot-resistance evidence.
+
+## Token parser and mapped-address hardening
+
+Malformed token headers are rejected without coercing untrusted algorithm values
+to strings. This prevents an object-valued `alg` from throwing through the
+verification API or middleware. All three token segments must use canonical,
+unpadded base64url. Tokens with whitespace, ignored punctuation, padding, or
+noncanonical trailing bits are rejected; tokens produced by `issueToken` already
+use the required encoding.
+
+Hexadecimal IPv4-mapped IPv6 addresses (for example `::ffff:c000:201`) now map to
+the corresponding IPv4 /24 (`192.0.2.0/24`), matching dotted mapped addresses.
+Previously these hex addresses all shared the IPv6 zero-prefix /48, allowing
+cross-network token acceptance when that address format reached the issuer and
+verifier. Existing tokens bound to that incorrect subnet are rejected and clients
+must obtain fresh tokens. Native IPv6 retains its /48 policy.

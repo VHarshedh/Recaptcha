@@ -85,6 +85,12 @@ function verifyToken(token, opts = {}) {
     return fail("malformed token: expected 3 dot-separated parts");
   }
 
+  // Require the canonical unpadded base64url wire format. Buffer's decoder
+  // otherwise silently ignores punctuation, whitespace and padding aliases.
+  for (const part of parts) {
+    if (!/^[A-Za-z0-9_-]+$/.test(part) || Buffer.from(part, "base64url").toString("base64url") !== part)
+      return fail("malformed token encoding");
+  }
   const [headerB64, claimsB64, sigB64] = parts;
 
   // ── Decode header ─────────────────────────────────────────────────
@@ -94,8 +100,9 @@ function verifyToken(token, opts = {}) {
   } catch {
     return fail("malformed header");
   }
-  if (!header || header.alg !== "EdDSA" || header.typ !== "ATT+JWT") {
-    return fail(`unsupported algorithm: ${header?.alg}`);
+  if (!header || typeof header !== "object" || Array.isArray(header) || header.alg !== "EdDSA" || header.typ !== "ATT+JWT") {
+    // Never coerce attacker-controlled JSON objects to strings in error paths.
+    return fail("unsupported token header");
   }
 
   // ── Verify signature FIRST (before trusting any claim) ────────────

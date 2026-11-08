@@ -53,6 +53,13 @@ function maskIP(raw) {
     const expanded = expandIPv6(ip);
     if (expanded) {
       const groups = expanded.split(":");
+      // RFC 4291 IPv4-mapped IPv6 uses 80 zero bits followed by ffff.
+      // Hex and dotted spellings must share the IPv4 subnet policy; treating
+      // the mapped prefix as /48 collapses every mapped IPv4 peer together.
+      if (groups.slice(0, 5).every(group => group === "0000") && groups[5] === "ffff") {
+        const high = parseInt(groups[6], 16), low = parseInt(groups[7], 16);
+        return `${high >>> 8}.${high & 255}.${low >>> 8}.0/24`;
+      }
       // Zero out groups 4–8 (indices 3–7) for /48.
       return (
         groups.slice(0, 3).join(":") + "::/48"
