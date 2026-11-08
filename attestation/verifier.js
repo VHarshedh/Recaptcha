@@ -133,6 +133,10 @@ function verifyToken(token, opts = {}) {
   if (claims?.demo === true && (opts.allowInsecureDemo !== true || process.env.NODE_ENV === "production"))
     return fail("Demo puzzle token cannot authorize access");
 
+  if (process.env.NODE_ENV === "production" && opts[SHARED_CHECK] !== true &&
+      claims?.instance !== require("./process_identity"))
+    return fail("Token requires shared replay verification or its issuing process");
+
   // ── Required fields ───────────────────────────────────────────────
   if (!claims || typeof claims.score !== "number" || !Number.isFinite(claims.score) || claims.score < 0 || claims.score > 1) {
     return fail("missing or invalid score");

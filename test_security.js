@@ -96,7 +96,7 @@ async function main() {
     assert.equal(status, 403);
     process.env.TRUST_PROXY = "1";
     assert.equal(getClientIP(req), "203.0.113.10");
-    assert.equal(getClientIP({ ...req, headers: { "x-forwarded-for": "198.51.100.1, invalid" } }), "192.0.2.1");
+    assert.equal(getClientIP({ ...req, headers: { "x-forwarded-for": "198.51.100.1, invalid" } }), "unknown");
   } finally {
     if (originalProxy === undefined) delete process.env.TRUST_PROXY;
     else process.env.TRUST_PROXY = originalProxy;

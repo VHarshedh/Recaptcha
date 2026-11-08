@@ -78,6 +78,7 @@ function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = 
 
   // ── Build claims ──────────────────────────────────────────────────
   const claims = {
+    instance: require("./process_identity"),
     demo,
     score,
     origin,

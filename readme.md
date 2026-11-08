@@ -91,7 +91,7 @@ Registration tickets and challenges are single-use. Credentials currently expire
 
 ## Token policy and proxies
 
-`verifyToken` is synchronous and uses a process-local nonce cache. In production it requires an explicit `ATTESTATION_STATE_MODE=single-process`; all token consumption must then occur in that process. For multiple instances, use `verifyTokenAsync` with shared `nonceStore`, or pass `nonceStore` to `attestationMiddleware`.
+`verifyToken` is synchronous and uses a process-local nonce cache. In production it requires an explicit `ATTESTATION_STATE_MODE=single-process`; issuance and consumption must then occur in that same process. Signed tokens carry a random per-process `instance` identity. Restarting invalidates outstanding local tokens, so a lost in-memory nonce cache cannot admit them again. For multiple instances, use `verifyTokenAsync` with shared `nonceStore`, or pass `nonceStore` to `attestationMiddleware`.
 
 Middleware requires explicit canonical `origin` and `host` configuration, for example `attestationMiddleware({ action: "login", origin: "https://example.com", host: "https://example.com" })`. These must come from trusted application configuration, never request headers. Local replay storage rejects new claims at 100,000 live entries without evicting used nonces. Tokens larger than 8 KiB are rejected before parsing. Run `node test_boundary_security.js` for these regression checks.
 
@@ -237,3 +237,32 @@ Previously these hex addresses all shared the IPv6 zero-prefix /48, allowing
 cross-network token acceptance when that address format reached the issuer and
 verifier. Existing tokens bound to that incorrect subnet are rejected and clients
 must obtain fresh tokens. Native IPv6 retains its /48 policy.
+
+## Restart and IP-identity migration
+
+Production synchronous verification now accepts only tokens issued by the same
+process. Separate issuer/verifier processes must use `verifyTokenAsync` with one
+retained shared nonce store (or middleware configured with that store), including
+when `ATTESTATION_STATE_MODE=single-process` was previously used. Shared replay
+storage must retain its contents for the complete token validity period; deleting
+or restoring an older replay database can still permit replay. Do not mix local
+and shared verification for the same protected operation.
+
+During upgrade, tokens without a matching process identity are rejected by local
+production verification. Clients must obtain new tokens. Restarted instances must
+not restore a previous process identity from configuration or disk. Shared-store
+verification continues to accept tokens from other issuer processes.
+
+`getClientIP` now canonicalizes both socket and trusted forwarded addresses:
+IPv4-mapped IPv6 becomes dotted IPv4, and native IPv6 becomes eight lowercase
+hexadecimal groups. Valid mixed IPv4/IPv6 notation is supported. Present malformed
+trusted forwarding headers yield `unknown` instead of the proxy's IP. Token
+verification rejects that identity; fix proxy formatting rather than relying on
+fallback. Pending challenges may need restarting during a rolling upgrade because
+stored request identities use the old format. Rate-limit and session-quota keys
+also change for previously noncanonical addresses; deploy consistently across
+replicas. IP parsing rejects ambiguous leading-zero IPv4 and invalid scoped forms.
+
+Run `node test_restart_binding.js` for independent production verifier-process
+checks, and `node test_ip_identity.js` for canonical rate/quota identities and
+forwarded-address handling. Both suites also run under `npm test`.
