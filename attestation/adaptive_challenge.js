@@ -5,7 +5,7 @@ const { issueToken } = require("./token");
 const { maskIP, getClientIP } = require("./ip_mask");
 const { extractHeaderProfile } = require("./header_check");
 const { generateChallenge, verifyPoW } = require("../pow_verifier");
-const { decryptTelemetry, deriveSessionKey } = require("../compiler/ecdh_session");
+const { decryptTelemetry, deriveSessionKey, validateEnvelope } = require("../compiler/ecdh_session");
 const { generateVisual, answerHash } = require("./visual_captcha");
 
 function difficultyForScore(score) {
@@ -29,9 +29,9 @@ function encryptRendering(instructions, session) {
 }
 
 class AdaptiveChallenge {
-  constructor(store, { secret = crypto.randomBytes(32), authorize = null, visualFactory = generateVisual,
+  constructor(store, { secret = crypto.randomBytes(32), authorize = null, allowInsecureDemo = false, visualFactory = generateVisual,
     powFactory = difficulty => ({ ...generateChallenge(), difficulty }) } = {}) {
-    if (process.env.NODE_ENV === "production" && typeof authorize !== "function")
+    if ((process.env.NODE_ENV === "production" || !allowInsecureDemo) && typeof authorize !== "function")
       throw new Error("Production requires a server-side authorization policy independent of client telemetry");
     this.authorize = authorize;
     this.store = store;
@@ -40,6 +40,7 @@ class AdaptiveChallenge {
     this.powFactory = powFactory;
   }
   async assess(telemetry, req, headerCheck, session, reputationPenalty = 0) {
+    if (!telemetry || typeof telemetry.action !== "string" || !telemetry.action || telemetry.action.length > 128) throw new Error("Invalid action");
     if (this.authorize && await this.authorize(req, telemetry.action) !== true)
       return { status: "failed", error: "Independent verification required" };
     const result = computeScore(telemetry, headerCheck);
@@ -70,7 +71,8 @@ class AdaptiveChallenge {
   }
   // Consume before decryption or validation: any attempt burns this challenge.
   async verify(envelope, req) {
-    const entry = await this.store.consume(envelope?.sid);
+    validateEnvelope(envelope);
+    const entry = await this.store.consume(envelope.sid);
     if (!entry) throw new Error("unknown, expired, or consumed challenge");
     const { claims } = entry;
     if (!claims || Date.now() >= claims.expiresAt || binding(extractHeaderProfile(req)) !== claims.binding)

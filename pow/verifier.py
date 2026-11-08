@@ -95,7 +95,7 @@ def verify_pow(
     if type(difficulty) is not int or difficulty < 1 or difficulty > 256:
         return {"valid": False, "reason": "invalid difficulty"}
 
-    if type(issued_at) not in (int, float) or not 0 <= issued_at <= 9007199254740991:
+    if type(issued_at) is not int or not 0 <= issued_at <= 9007199254740991:
         return {"valid": False, "reason": "invalid issued_at"}
 
     if type(max_age_ms) is not int or not 0 < max_age_ms <= 9007199254740991:

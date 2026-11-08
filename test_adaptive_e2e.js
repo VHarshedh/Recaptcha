@@ -50,13 +50,13 @@ async function main() {
   // Exercise real hashing at low difficulty to avoid probabilistic timeout
   // failures on slow CI machines; assert the requested policy difficulty too.
   let requestedDifficulty;
-  const adaptive = new AdaptiveChallenge(challenges, { secret,
+  const adaptive = new AdaptiveChallenge(challenges, { secret, allowInsecureDemo: true,
     powFactory: difficulty => { requestedDifficulty = difficulty; return { ...generateChallenge(), difficulty: 8 }; },
     visualFactory: (key, id) => ({
     answerHash: answerHash(key, "ABC234", id), instructions: renderAnswer("ABC234"),
   }) });
   const rateLimiter = new RateLimiter({ maxRequests: 1000, failureLimit: 1000 });
-  const server = createServer({ sessionStore: sessions, adaptive, rateLimiter, allowedOrigins: ["https://other.example"] });
+  const server = createServer({ allowInsecureDemo: true, sessionStore: sessions, adaptive, rateLimiter, allowedOrigins: ["https://other.example"] });
   // Native synchronous mining blocks this test process; avoid stale keep-alive
   // sockets while mining. Production mining runs in the browser worker.
   server.keepAliveTimeout = 120_000;

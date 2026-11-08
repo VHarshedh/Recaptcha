@@ -17,6 +17,8 @@ const path = require("node:path");
 const ROOT_DIR = __dirname;
 
 const TEST_SUITES = [
+  { name: "Hardening regressions", file: "test_hardening.js" },
+  { name: "Boundary Security Regressions", file: "test_boundary_security.js" },
   { name: "Modular Exports Verification", file: null, run: testModularExports },
   { name: "Compiler Suite", file: "compiler/test_compiler.js" },
   { name: "Attestation Suite", file: "attestation/test_attestation.js" },

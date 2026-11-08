@@ -12,6 +12,13 @@ const {issueToken}=require("./attestation/token"),{verifyTokenAsync}=require("./
   const encryptionKey=crypto.randomBytes(32),prefix="test:"+crypto.randomUUID()+":";
   const states=clients.map(c=>new RedisState(c,{prefix,encryptionKey}));
   const stores=states.map(s=>new RedisSessions(s));
+  const limited=states.map(s=>new RedisSessions(s,{namespace:"quota-test",maxPerIP:1,ttl:1000}));
+  assert(await limited[0].canAccept("test-ip")); assert(await limited[0].canAccept("test-ip"));
+  const attempts=await Promise.all(limited.map((s,i)=>s.set("race"+i,{keyPair:generateEphemeralKeyPair(),headerProfile:{clientIP:"test-ip"}})));
+  assert.equal(attempts.filter(Boolean).length,1);
+  assert.equal(await limited[0].canAccept("test-ip"),false);
+  await limited[1].consume("race"+attempts.indexOf(true));
+  assert(await limited[0].canAccept("test-ip"));
   const kp=generateEphemeralKeyPair();
   assert(await stores[0].set(kp.id,{keyPair:kp,expectedVmState:42}));
   const results=await Promise.all(stores.map(s=>s.consume(kp.id)));

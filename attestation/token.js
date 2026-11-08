@@ -48,6 +48,8 @@ const DEFAULT_TTL_S = 45;
  * @returns {{ token: string, claims: Object }}
  */
 function issueToken({ score, action, ipSubnet, ttlS, nowMs, origin = "", host = "" }) {
+  if (ttlS !== undefined && !Number.isSafeInteger(ttlS)) throw new TypeError("Invalid TTL");
+  if (nowMs !== undefined && (!Number.isSafeInteger(nowMs) || nowMs < 0)) throw new TypeError("Invalid clock");
   for (const value of [origin, host])
     if (typeof value !== "string" || (value !== "" && normalizeOrigin(value) !== value)) throw new TypeError("invalid token origin/host");
   // ── Validate score ────────────────────────────────────────────────

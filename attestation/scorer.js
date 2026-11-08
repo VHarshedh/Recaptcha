@@ -57,7 +57,7 @@ if (Math.abs(SUM - 1.0) > 1e-9) {
 function scoreRuntime(rt) {
   if (!rt || typeof rt !== "object") return 0;
 
-  const penalty = typeof rt.confidence_penalty === "number"
+  const penalty = Number.isFinite(rt.confidence_penalty)
     ? clamp01(rt.confidence_penalty)
     : 1;
 
@@ -85,6 +85,7 @@ function scoreRuntime(rt) {
 function scoreHardware(hw) {
   if (!hw || typeof hw !== "object") return 0;
 
+  if (!hw.profile || !Number.isSafeInteger(hw.profile.hardwareConcurrency) || hw.profile.hardwareConcurrency < 1) return 0;
   let score = 1.0;
 
   // ── WebGL signals ─────────────────────────────────────────────────
@@ -124,8 +125,8 @@ function scoreHardware(hw) {
 
   // ── Structured anomalies from the advanced collector ──────────────
   if (Array.isArray(hw.anomalies)) {
-    const moderate = hw.anomalies.filter(a => a.strength === "moderate").length;
-    const weak     = hw.anomalies.filter(a => a.strength === "weak").length;
+    const moderate = hw.anomalies.filter(a => a && a.strength === "moderate").length;
+    const weak     = hw.anomalies.filter(a => a && a.strength === "weak").length;
     score -= moderate * 0.15;
     score -= weak * 0.03;
   }
@@ -267,21 +268,8 @@ function scorePoW(pow) {
   if (!pow || typeof pow !== "object") return 0;
   if (pow.serverVerified !== true) return 0;
 
-  let score = 0.80; // valid server-verified PoW = strong baseline.
+  return 1; // Credit only server-verified work, never client-reported timing.
 
-  // Duration reasonableness: very fast solutions → ASIC/GPU farm.
-  if (typeof pow.durationMs === "number" &&
-      typeof pow.difficulty === "number") {
-    const expectedMs = Math.pow(2, pow.difficulty) * 0.002;
-    const ratio = pow.durationMs / Math.max(expectedMs, 1);
-    if (ratio < 0.01)       score -= 0.30; // >100× faster than expected
-    else if (ratio < 0.1)   score -= 0.10; // >10× faster
-    else                    score += 0.20; // normal range
-  } else {
-    score += 0.10;
-  }
-
-  return clamp01(score);
 }
 
 /* ------------------------------------------------------------------ */
@@ -295,7 +283,7 @@ function scorePoW(pow) {
  * @returns {{ score: number, breakdown: Object, clamped: boolean, clampReason?: string }}
  */
 function computeScore(payload, headerCheck) {
-  if (!payload || typeof payload !== "object") {
+  if (!payload || Array.isArray(payload) || typeof payload !== "object" || !validTelemetry(payload)) {
     return { score: 0.0, breakdown: {}, clamped: true, clampReason: "missing payload" };
   }
 
@@ -400,3 +388,16 @@ module.exports = {
   _scoreKinematics: scoreKinematics,
   _scorePoW: scorePoW,
 };
+
+function validTelemetry(value, depth = 0) {
+  if (depth > 32) return false;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (!value || typeof value !== "object") return true;
+  for (const [key, child] of Object.entries(value)) {
+    if ((/Count$|^pointCount$/.test(key)) && (!Number.isSafeInteger(child) || child < 0)) return false;
+    if (key === "eventCounts" && (!child || typeof child !== "object" || Object.values(child).some(n => !Number.isSafeInteger(n) || n < 0))) return false;
+    if (key === "anomalies" && (!Array.isArray(child) || child.some(a => !a || !["string", "object"].includes(typeof a)))) return false;
+    if (!validTelemetry(child, depth + 1)) return false;
+  }
+  return true;
+}

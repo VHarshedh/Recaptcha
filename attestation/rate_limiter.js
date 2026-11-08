@@ -22,9 +22,12 @@ class RateLimiter {
     let e = this.entries.get(key);
     if (!e) {
       if (this.entries.size >= this.maxEntries) {
-        const victim = this.clean.size ? this.clean.keys().next() : this.entries.keys().next();
-        this.expiry.delete(victim.value);
-        this.entries.delete(victim.value); this.clean.delete(victim.value);
+        for (const [id, item] of this.entries) {
+          if (item.until <= now && item.requests.every(t => t <= now - this.windowMs) && item.failures.every(t => t <= now - this.failureWindowMs)) {
+            this.entries.delete(id); this.clean.delete(id); this.expiry.delete(id);
+          }
+        }
+        if (this.entries.size >= this.maxEntries) return null;
       }
       e = { requests: [], failures: [], consecutive: 0, strikes: 0, until: 0, last: now };
       this.entries.set(key, e);

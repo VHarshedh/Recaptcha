@@ -18,7 +18,7 @@
 const crypto = require("node:crypto");
 const { publicKey } = require("./keys");
 const { maskIP, getClientIP } = require("./ip_mask");
-const { requestOrigin, requestHostOrigin } = require("./origin");
+const { normalizeOrigin } = require("./origin");
 const { NonceCache } = require("./nonce_cache");
 
 /* ------------------------------------------------------------------ */
@@ -77,7 +77,9 @@ function verifyToken(token, opts = {}) {
   if (typeof token !== "string") {
     return fail("token must be a string");
   }
+  if (token.length > 8192) return fail("token too large");
 
+  if (opts.nowMs !== undefined && (!Number.isSafeInteger(opts.nowMs) || opts.nowMs < 0)) return fail("invalid clock");
   const parts = token.split(".");
   if (parts.length !== 3) {
     return fail("malformed token: expected 3 dot-separated parts");
@@ -92,7 +94,7 @@ function verifyToken(token, opts = {}) {
   } catch {
     return fail("malformed header");
   }
-  if (!header || header.alg !== "EdDSA") {
+  if (!header || header.alg !== "EdDSA" || header.typ !== "ATT+JWT") {
     return fail(`unsupported algorithm: ${header?.alg}`);
   }
 
@@ -119,16 +121,16 @@ function verifyToken(token, opts = {}) {
   }
 
   // ── Required fields ───────────────────────────────────────────────
-  if (!claims || typeof claims.score !== "number" || !Number.isFinite(claims.score)) {
+  if (!claims || typeof claims.score !== "number" || !Number.isFinite(claims.score) || claims.score < 0 || claims.score > 1) {
     return fail("missing or invalid score");
   }
-  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp)) {
+  if (typeof claims.exp !== "number" || !Number.isSafeInteger(claims.exp)) {
     return fail("missing or invalid exp");
   }
-  if (typeof claims.iat !== "number" || !Number.isFinite(claims.iat)) {
+  if (typeof claims.iat !== "number" || !Number.isSafeInteger(claims.iat)) {
     return fail("missing or invalid iat");
   }
-  if (typeof claims.nonce !== "string" || claims.nonce.length === 0) {
+  if (typeof claims.nonce !== "string" || !/^[a-f0-9]{32}$/.test(claims.nonce)) {
     return fail("missing or invalid nonce");
   }
   if (typeof claims.action !== "string") {
@@ -228,6 +230,11 @@ async function verifyTokenAsync(token, opts = {}) {
 }
 
 function attestationMiddleware(opts = {}) {
+  // Trust application configuration, never caller-controlled request headers.
+  for (const field of ["origin", "host"]) {
+    if (!opts[field] || normalizeOrigin(opts[field]) !== opts[field])
+      throw new TypeError("Explicit canonical " + field + " required");
+  }
   const {
     action,
     minScore = 0.70,
@@ -238,7 +245,7 @@ function attestationMiddleware(opts = {}) {
     // Extract token.
     let token;
     const authHeader = req.headers?.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
       token = authHeader.slice(7).trim();
     } else {
       token = req.headers?.[customHeader.toLowerCase()];
@@ -254,7 +261,7 @@ function attestationMiddleware(opts = {}) {
     const clientIP = getClientIP(req);
 
     const verify = opts.nonceStore ? verifyTokenAsync : verifyToken;
-    const checked = verify(token, { clientIP, action, minScore, nonceStore: opts.nonceStore, origin: opts.origin || requestOrigin(req), host: opts.host || requestHostOrigin(req) });
+    const checked = verify(token, { clientIP, action, minScore, nonceStore: opts.nonceStore, origin: opts.origin, host: opts.host });
 
     const finish = result => {
     if (!result.valid) {

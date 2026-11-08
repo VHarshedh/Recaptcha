@@ -22,7 +22,9 @@ class NonceCache {
    *   Must be ≥ the maximum token TTL so that a nonce cannot be replayed
    *   after its bucket has been evicted.  Default: 120 000 ms (2 minutes).
    */
-  constructor(windowMs = 120_000) {
+  constructor(windowMs = 120_000, maxEntries = 100_000) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new RangeError("invalid nonce capacity");
+    this._maxEntries = maxEntries;
     if (!Number.isFinite(windowMs) || windowMs < 1000) {
       throw new RangeError("windowMs must be ≥ 1000");
     }
@@ -66,6 +68,8 @@ class NonceCache {
       return false; // replay detected
     }
 
+    // Never evict live nonces: eviction would turn overload into a replay bypass.
+    if (this.size >= this._maxEntries) return false;
     this._current.add(nonce);
     return true;
   }

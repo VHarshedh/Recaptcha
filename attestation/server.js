@@ -25,7 +25,7 @@ const { createMiddleware, createDecryptHandler, SessionStore } = require("../com
 
 const PORT = parseInt(process.argv[2], 10) || 3100;
 
-function createServer({ sessionStore = new SessionStore(), adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000)), allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()) : [], rateLimit = {}, rateLimiter = new RateLimiter(rateLimit), passkeys = null } = {}) {
+function createServer({ sessionStore = new SessionStore(), allowInsecureDemo = false, adaptive = new AdaptiveChallenge(new SessionStore(10_000, 60_000), { allowInsecureDemo }), allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()) : [], rateLimit = {}, rateLimiter = new RateLimiter(rateLimit), passkeys = null } = {}) {
 if (process.env.NODE_ENV === "production" && process.env.ATTESTATION_STATE_MODE !== "single-process" && !(sessionStore.distributed && adaptive.store.distributed && rateLimiter.distributed))
   throw new Error("Local state requires ATTESTATION_STATE_MODE=single-process; clustered deployment is unsupported");
 const origins = new Set(allowedOrigins.map(value => { const origin = normalizeOrigin(value); if (!origin) throw new Error("invalid allowed origin"); return origin; }));

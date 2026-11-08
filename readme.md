@@ -93,6 +93,8 @@ Registration tickets and challenges are single-use. Credentials currently expire
 
 `verifyToken` is synchronous and uses a process-local nonce cache. In production it requires an explicit `ATTESTATION_STATE_MODE=single-process`; all token consumption must then occur in that process. For multiple instances, use `verifyTokenAsync` with shared `nonceStore`, or pass `nonceStore` to `attestationMiddleware`.
 
+Middleware requires explicit canonical `origin` and `host` configuration, for example `attestationMiddleware({ action: "login", origin: "https://example.com", host: "https://example.com" })`. These must come from trusted application configuration, never request headers. Local replay storage rejects new claims at 100,000 live entries without evicting used nonces. Tokens larger than 8 KiB are rejected before parsing. Run `node test_boundary_security.js` for these regression checks.
+
 Every verification requires the expected `action`, `origin`, `host`, and a valid `clientIP`. `host` is the full issuer request origin, including scheme, not a bare hostname. Minimum score defaults to 0.70 and cannot be lower. A token is single-use and lasts 45 seconds by default. Failed policy checks do not consume its nonce.
 
 Set `TRUST_PROXY=1` only behind a trusted proxy that overwrites forwarded headers and prevents direct access to the origin. HTTPS termination uses `X-Forwarded-Proto`; malformed or multiple scheme values are rejected. Set `ALLOWED_ORIGINS` to a comma-separated allowlist for telemetry CORS if needed. Passkey routes require the configured exact same origin.
@@ -106,3 +108,13 @@ Validated locally: eight existing suites, report regressions including Python/Ja
 Compilation runs in at most two worker threads per process with a ten-second timeout; excess jobs receive 503. Storage and request limits reduce resource abuse, but an upstream proxy/CDN still needs capacity controls. Session eviction can invalidate in-flight development requests. Individual public IP limits can still affect users sharing a NAT.
 
 WebAuthn implementation follows the [SimpleWebAuthn server API](https://simplewebauthn.dev/docs/packages/server); browser helpers use its matching browser package.
+
+## Security migration: explicit demo mode
+
+Adaptive issuance now requires an independent `authorize(req, action)` callback in every environment. For local demonstrations only, pass `{ allowInsecureDemo: true }` to `AdaptiveChallenge` or `createServer`. Production still requires independent authorization; do not expose demo mode publicly. The standalone server intentionally fails without an authorization configuration.
+
+Local rate limits and session stores reject new identities/sessions when full instead of evicting live protection. Size capacity for expected traffic and monitor 429 responses. Redis session quotas now count outstanding sessions and enforce insertion atomically. Deploy this change with pending sessions drained (up to five minutes); old Redis session records lack quota metadata. Redis Cluster is not supported by these multi-key transactions.
+
+Encrypted submissions require canonical base64, P-256 keys and 12-byte IVs. Missing hardware evidence earns no hardware credit, malformed telemetry fails scoring, and client timing earns no PoW bonus. Passkey-issued CAPTCHA tokens establish a verification event, not the application account identity or permission to access it.
+
+Validation: `npm test`, `npm run test:passkeys`, and `npm run test:report`. Run `npm run test:redis` with `TEST_REDIS_URL` pointing to a dedicated instance before deploying Redis changes.

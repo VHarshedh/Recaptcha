@@ -43,9 +43,9 @@ async function main() {
   assert(!limiter.check(subnet).allowed);
   time += 1000; assert(limiter.check(subnet).allowed);
   limiter.failure(subnet); assert.equal(limiter.check(subnet).retryAfter, 2);
-  assert(limiter.check("other").allowed); assert(limiter.check("overflow").allowed); assert(limiter.entries.has(subnet));
+  assert(limiter.check("other").allowed); assert(!limiter.check("overflow").allowed); assert(limiter.entries.has(subnet));
   time += 6000; assert(limiter.check("overflow").allowed); assert(limiter.entries.size <= 2);
-  const limitedServer = createServer({ rateLimit: { maxRequests: 2 } });
+  const limitedServer = createServer({ allowInsecureDemo: true, rateLimit: { maxRequests: 2 } });
   await new Promise(resolve => limitedServer.listen(0, "127.0.0.1", resolve));
   try {
     const origin = `http://127.0.0.1:${limitedServer.address().port}`;
@@ -55,7 +55,7 @@ async function main() {
     assert.equal(blocked.status, 429); assert(Number(blocked.headers.get("retry-after")) > 0);
   } finally { await new Promise(resolve => limitedServer.close(resolve)); }
   const failureStore = new SessionStore(), reputation = new RateLimiter({ maxRequests: 100 });
-  const failureServer = createServer({ sessionStore: failureStore, rateLimiter: reputation });
+  const failureServer = createServer({ allowInsecureDemo: true, sessionStore: failureStore, rateLimiter: reputation });
   await new Promise(resolve => failureServer.listen(0, "127.0.0.1", resolve));
   try {
     const origin = `http://127.0.0.1:${failureServer.address().port}`;
@@ -90,7 +90,7 @@ async function main() {
     assert.equal(getClientIP(req), "192.0.2.1");
     const token = issueToken({ score: 0.9, action: "login", ipSubnet: "198.51.100.0/24" }).token;
     let status;
-    attestationMiddleware()({ ...req, headers: { ...req.headers, "x-attestation-token": token } },
+    attestationMiddleware({ action: "login", origin: "https://example.com", host: "https://example.com" })({ ...req, headers: { ...req.headers, "x-attestation-token": token } },
       { writeHead(code) { status = code; }, end() {} }, () => assert.fail("spoofed IP accepted"));
     assert.equal(status, 403);
     process.env.TRUST_PROXY = "1";
@@ -215,8 +215,8 @@ async function hardeningRegressions() {
   assert(store.set("a1", data("198.51.100.1"))); assert(store.set("a2", data("198.51.100.1")));
   assert.equal(store.set("a3", data("198.51.100.1")), false);
   assert(store.set("other", data("203.0.113.4")));
-  assert.equal(store.set("overflow", data("10.0.0.1")), true);
-  assert.equal(store.consume("victim"), null); assert(store.consume("a1"));
+  assert.equal(store.set("overflow", data("10.0.0.1")), false);
+  assert(store.consume("victim")); assert(store.consume("a1"));
   assert(store.set("a3", data("198.51.100.1")));
   store._map.get("a2").createdAt = Date.now() - 60001;
   assert(store.canAccept("198.51.100.1"));
@@ -225,13 +225,13 @@ async function hardeningRegressions() {
   let now = 0;
   const limiter = new RateLimiter({ maxEntries: 3, now: () => now, failureWindowMs: 1000 });
   for (const key of ["a", "b", "c"]) { assert(limiter.check(key).allowed); limiter.failure(key); }
-  assert(limiter.check("d").allowed);
+  assert(!limiter.check("d").allowed);
   assert(limiter.expiry.heap.length <= 3);
   for (let i = 0; i < 100; i++) limiter.failure("a");
   assert(limiter.expiry.heap.length <= 3);
   now = 1001;
-  assert(limiter.check("d").allowed); assert(limiter.entries.has("a"));
-  for (let i = 0; i < 100; i++) assert(limiter.check("clean" + i).allowed);
+  assert(!limiter.check("d").allowed); assert(limiter.entries.has("a"));
+  for (let i = 0; i < 100; i++) assert(!limiter.check("clean" + i).allowed);
   assert.equal(limiter.entries.size, 3); assert(limiter.entries.has("a"));
 
   // Serialize the same Error with and without a DevTools-like getter read.
@@ -270,7 +270,7 @@ async function hardeningRegressions() {
   assert(!verifyToken(bound, { origin: "https://evil.example", host: "https://attest.example", skipNonce: true }).valid);
   assert(!verifyToken(bound, { origin: "https://app.example", host: "https://evil.example", skipNonce: true }).valid);
   assert(verifyToken(bound, { action: "login", clientIP: "192.0.2.1", ipSubnet: "192.0.2.0/24", origin: "https://app.example", host: "https://attest.example", skipNonce: true }).valid);
-  const server = createServer({ allowedOrigins: ["https://app.example"] });
+  const server = createServer({ allowInsecureDemo: true, allowedOrigins: ["https://app.example"] });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
     const url = `http://127.0.0.1:${server.address().port}`;

@@ -20,7 +20,7 @@
 const { extractHeaderProfile, verifyHeaderConsistency } = require("../attestation/header_check");
 const http = require("node:http");
 const { compileAsync } = require("./compile_async");
-const { decryptTelemetry } = require("./ecdh_session");
+const { decryptTelemetry, validateEnvelope } = require("./ecdh_session");
 const { generateChallenge, verifyPoW } = require("../pow_verifier");
 const { maskIP, getClientIP } = require("../attestation/ip_mask");
 
@@ -65,7 +65,7 @@ class SessionStore {
     const ipSubnet = entry.ipSubnet || entry.headerProfile?.clientIP || "unknown";
     this.remove(sessionId);
     if (!this.canAccept(ipSubnet)) return false;
-    if (this._map.size >= this._maxSize) this.remove(this._map.keys().next().value);
+    if (this._map.size >= this._maxSize) return false;
     this._map.set(sessionId, {
       ...entry,
       ipSubnet,
@@ -211,6 +211,7 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
         return res.end(JSON.stringify({ error: "missing or invalid encrypted payload envelope" }));
       }
 
+      validateEnvelope(body);
       const session = await sessionStore.consume(body.sid);
       if (!session) {
         res.writeHead(403, { "Content-Type": "application/json" });
@@ -257,7 +258,7 @@ function createDecryptHandler(sessionStore, onTelemetry, onFailure = () => {}) {
         verifyHeaderConsistency(session.headerProfile, extractHeaderProfile(req), plaintext),
         { ...session, sessionId: body.sid, clientPublicKey: body.cpk });
     } catch (err) {
-      await onFailure(req);
+      try { await onFailure(req); } catch {}
       console.error("[attest] decrypt error:", err.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "invalid payload" }));

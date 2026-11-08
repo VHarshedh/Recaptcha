@@ -27,3 +27,9 @@ This file supersedes earlier deployment guidance where it conflicts. Client Java
 Production applications must provision `ATTESTATION_KEY_PATH`. Use `createRedisDeployment` for shared state and passkeys, or explicitly configure a single-process deployment with an independent authorization policy. See `readme.md` for enrollment, verification, shared-secret requirements, and validation gaps.
 
 Validation: `npm test` and `npm run test:report`. The latter also requires Python and checks JavaScript/Python PoW hashes, unsafe numeric inputs, proxy trust, Unicode/regex preservation, and nonce handling after rejected verification.
+
+## Additional hardening (supersedes conflicting rows above)
+
+Independent authorization is now the default in all environments; telemetry-only demonstrations require explicit `allowInsecureDemo`. Local rate-limit and session capacity now fail closed without evicting live entries. Redis quotas enforce outstanding-session limits during atomic insertion. Strict envelope validation precedes session consumption; invalid telemetry no longer earns full hardware/runtime credit. Worker failures release capacity, and Redis initialization failures close the connection. See the README migration notes, including draining old Redis sessions before deployment.
+
+Local hardening regressions are included in the master suite. Live Redis quota/race validation requires a dedicated instance and was not run in this workspace.

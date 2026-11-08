@@ -201,6 +201,7 @@ async function ${name}(payloadObj, endpointUrl, vmState) {
  * @returns {Object} — the decrypted JSON payload
  */
 function decryptTelemetry(encrypted, serverPrivateKey, expectedVmState) {
+  validateEnvelope(encrypted);
   // Decode base64 fields.
   const clientPubDer = Buffer.from(encrypted.cpk, "base64");
   const iv           = Buffer.from(encrypted.iv, "base64");
@@ -252,8 +253,20 @@ function deriveSessionKey(sharedSecret, vmState) {
 }
 
 module.exports = {
+  validateEnvelope,
   deriveSessionKey,
   generateEphemeralKeyPair,
   generateClientECDHCode,
   decryptTelemetry,
 };
+
+function validateEnvelope(value) {
+  if (!value || typeof value.sid !== "string" || !/^[a-f0-9]{16}$/.test(value.sid)) throw new Error("Invalid session ID");
+  for (const field of ["cpk", "iv", "ct"]) {
+    const text = value[field];
+    if (typeof text !== "string" || text.length > 65536 || Buffer.from(text, "base64").toString("base64") !== text) throw new Error("Invalid base64 envelope");
+  }
+  if (Buffer.from(value.iv, "base64").length !== 12 || Buffer.from(value.ct, "base64").length < 16) throw new Error("Invalid cipher lengths");
+  const key = crypto.createPublicKey({ key: Buffer.from(value.cpk, "base64"), format: "der", type: "spki" });
+  if (key.asymmetricKeyType !== "ec" || key.asymmetricKeyDetails.namedCurve !== "prime256v1") throw new Error("P-256 key required");
+}

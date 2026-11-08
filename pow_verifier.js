@@ -121,7 +121,7 @@ function verifyPoW({
   ) {
     return { valid: false, reason: "invalid difficulty" };
   }
-  if (!Number.isFinite(issuedAt)) {
+  if (!Number.isSafeInteger(issuedAt) || issuedAt < 0 || !Number.isSafeInteger(maxAgeMs) || maxAgeMs <= 0) {
     return { valid: false, reason: "invalid issuedAt" };
   }
 
