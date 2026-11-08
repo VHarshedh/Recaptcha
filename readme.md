@@ -142,3 +142,24 @@ do not flush a live Redis database. Back up state before migration.
 Run `TEST_REDIS_URL=<dedicated-test-instance> npm run test:redis` to exercise
 cross-client atomic operations, record substitution rejection, and expiration
 preservation against a real Redis server.
+
+## Passkey relying-party isolation migration
+
+Passkey tickets, challenges and credentials now use a `passkeys:v2:` namespace
+scoped to both the configured relying-party ID and exact origin. Replicas with
+identical configuration share state; different origins (including ports) do not.
+Previously, a software authenticator enrolled on one site could authenticate on
+another site sharing the same store, and enrollment tickets could cross sites.
+The server now enforces isolation independently of browser/authenticator behavior.
+
+Existing passkey records are not automatically adopted. Before deploying, stop
+old issuers, drain pending challenges and tokens, and either require trusted
+re-enrollment or migrate records offline using independently verified ownership
+of each credential. Legacy records do not contain sufficient relying-party
+metadata to infer ownership safely. Do not copy every credential into every new
+namespace or fall back to the old global keys. Coordinate this with the encrypted
+Redis state migration above and preserve remaining credential TTLs.
+
+`npm run test:passkeys` checks a real signed cross-relying-party authentication
+attempt, enrollment-ticket isolation, exact-origin separation, and same-site
+replica interoperability, in addition to the normal WebAuthn flow.

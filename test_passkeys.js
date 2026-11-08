@@ -21,6 +21,18 @@ const store={async put(k,v){if(entries.has(k))return false;entries.set(k,v);retu
  const authData=Buffer.concat([rpHash,Buffer.from([0x45]),Buffer.alloc(4),Buffer.alloc(16),length,credential,Buffer.from(cose)]);
  const response={id:b64(credential),rawId:b64(credential),type:"public-key",clientExtensionResults:{},response:{clientDataJSON:b64(clientData),attestationObject:b64(encodeCBOR(new Map([["fmt","none"],["attStmt",new Map()],["authData",authData]]))),transports:["internal"]}};
  assert.deepEqual(await service.handle("register/verify",{id:registration.id,response},req),{registered:true});
+ // A credential enrolled on one relying party must not authorize another,
+ // even when both deployments share Redis and the signing identity.
+ const foreignOrigin="https://other.test";
+ const foreignReq={headers:{host:"other.test",origin:foreignOrigin},socket:{encrypted:true,remoteAddress:"192.0.2.1"}};
+ const foreign=new Passkeys({store,rpID:"other.test",origin:foreignOrigin});
+ const foreignOptions=await foreign.handle("authenticate/options",{action:"login"},foreignReq);
+ const foreignData=Buffer.from(JSON.stringify({type:"webauthn.get",challenge:foreignOptions.options.challenge,origin:foreignOrigin}));
+ const foreignCounter=Buffer.alloc(4);foreignCounter.writeUInt32BE(1);
+ const foreignAuth=Buffer.concat([crypto.createHash("sha256").update("other.test").digest(),Buffer.from([5]),foreignCounter]);
+ const foreignSignature=crypto.sign("sha256",Buffer.concat([foreignAuth,crypto.createHash("sha256").update(foreignData).digest()]),pair.privateKey);
+ const foreignAssertion={id:b64(credential),rawId:b64(credential),type:"public-key",clientExtensionResults:{},response:{clientDataJSON:b64(foreignData),authenticatorData:b64(foreignAuth),signature:b64(foreignSignature)}};
+ await assert.rejects(()=>foreign.handle("authenticate/verify",{id:foreignOptions.id,response:foreignAssertion},foreignReq),/Unknown credential/);
  const options=await service.handle("authenticate/options",{action:"login"},req);
  const data=Buffer.from(JSON.stringify({type:"webauthn.get",challenge:options.options.challenge,origin}));
  const counter=Buffer.alloc(4);counter.writeUInt32BE(1);
