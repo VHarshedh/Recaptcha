@@ -163,3 +163,28 @@ Redis state migration above and preserve remaining credential TTLs.
 `npm run test:passkeys` checks a real signed cross-relying-party authentication
 attempt, enrollment-ticket isolation, exact-origin separation, and same-site
 replica interoperability, in addition to the normal WebAuthn flow.
+
+## Explicit passkey ceremony policy
+
+The passkey service accepts same-origin ceremonies only. Registration and
+assertion client data with `crossOrigin: true`, a non-boolean cross-origin value,
+or a `topOrigin` field are rejected. Missing `crossOrigin` remains supported for
+older clients; explicit `false` is accepted. This intentionally excludes
+cross-origin iframe integrations. Client data is still verified cryptographically
+by SimpleWebAuthn; these checks add policy and do not replace signature checks.
+
+Actions must be a nonempty array of nonempty strings (at most 128 characters).
+Authentication checks the current allowed-action set when verifying a pending
+challenge and again before issuing a token. Removing an action blocks outstanding
+challenges on that instance; deploy policy changes consistently across replicas.
+Previously issued tokens remain valid until expiry unless the relying application
+rejects that action itself.
+
+Configured origins require HTTPS. Non-production development may use HTTP on
+`localhost`, `127.0.0.1`, or `[::1]`. Configure a trusted TLS-terminating proxy using
+the proxy guidance above. The tests cover insecure-origin rejection, valid local
+development, signed cross-origin responses, and removal of an in-flight action.
+
+These controls do not prove humanity or prevent an enrolled account from using
+automation. Trusted enrollment, account authorization/revocation, application
+session security, and distributed abuse limits remain deployment responsibilities.

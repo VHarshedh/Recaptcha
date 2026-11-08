@@ -1,12 +1,19 @@
 "use strict";
 const crypto = require("node:crypto");
 const webauthn = require("@simplewebauthn/server");
+const { decodeClientDataJSON } = require("@simplewebauthn/server/helpers");
 const { issueToken } = require("./token");
 const { maskIP, getClientIP } = require("./ip_mask");
 const { requestOrigin, requestHostOrigin, normalizeOrigin } = require("./origin");
 class Passkeys {
   constructor({ store, rpID, origin, rpName = "Attestation", actions = ["login"] }) {
-    if (!store || normalizeOrigin(origin)!==origin || new URL(origin).hostname!==rpID || !actions.length) throw new Error("Invalid passkey configuration");
+    if (!store || !origin || normalizeOrigin(origin)!==origin || new URL(origin).hostname!==rpID ||
+        !Array.isArray(actions) || !actions.length || actions.some(action => typeof action !== "string" || !action || action.length > 128))
+      throw new Error("Invalid passkey configuration");
+    const url = new URL(origin);
+    const localDevelopment = process.env.NODE_ENV !== "production" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if (url.protocol !== "https:" && !localDevelopment) throw new Error("Passkey origin requires HTTPS");
     Object.assign(this,{store,rpID,origin,rpName,actions:new Set(actions)});
     // Shared Redis may serve multiple relying parties. Scope tickets, pending
     // challenges and credentials alike; client-provided IDs cannot select scope.
@@ -38,6 +45,15 @@ class Passkeys {
     if (!["register/verify","authenticate/verify"].includes(path)) throw new Error("Unknown passkey route");
     const pending=await this.store.consume(this.namespace+"webauthn:"+body.id);
     if (!pending || pending.kind!==path.split("/")[0] || pending.ip!==getClientIP(req)) throw new Error("Invalid or consumed challenge");
+    // This service supports same-origin ceremonies only. Registration and
+    // authentication library defaults differ, so enforce one explicit policy.
+    const encoded = body.response?.response?.clientDataJSON;
+    if (typeof encoded !== "string" || encoded.length > 16384) throw new Error("Invalid client data");
+    const clientData = decodeClientDataJSON(encoded);
+    if (!clientData || typeof clientData !== "object" || Array.isArray(clientData)) throw new Error("Invalid client data");
+    if ((clientData.crossOrigin !== undefined && clientData.crossOrigin !== false) || clientData.topOrigin !== undefined)
+      throw new Error("Cross-origin passkey ceremony forbidden");
+    if (pending.kind === "authenticate" && !this.actions.has(pending.action)) throw new Error("Unsupported action");
     const common={response:body.response,expectedChallenge:pending.challenge,expectedOrigin:this.origin,expectedRPID:this.rpID,requireUserVerification:true};
     if (pending.kind==="register") {
       const result=await webauthn.verifyRegistrationResponse(common);
@@ -52,6 +68,7 @@ class Passkeys {
     if (!result.verified) throw new Error("Authentication failed");
     const next={...saved,revision:saved.revision+1,credential:{...saved.credential,counter:result.authenticationInfo.newCounter}};
     if (!await this.store.update(this.namespace+"credential:"+saved.credential.id,saved,next)) throw new Error("Concurrent credential update; retry");
+    if (!this.actions.has(pending.action)) throw new Error("Unsupported action");
     const ipSubnet=maskIP(getClientIP(req));
     if (ipSubnet==="unknown") throw new Error("Client IP required");
     return {status:"passed",score:0.70,...issueToken({score:0.70,action:pending.action,ipSubnet,origin:this.origin,host:this.origin})};
