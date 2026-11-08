@@ -13,7 +13,7 @@ class RedisSessions {
     const ip=data.ipSubnet || data.headerProfile?.clientIP || "unknown";
     const keyPair={...data.keyPair,privateKey:data.keyPair.privateKey.export({type:"pkcs8",format:"der"}),publicKey:null};
     const key=this.state.name(this.namespace+":"+id), quota=this.quota(ip);
-    const raw=this.state.seal({...data,keyPair,quota});
+    const raw=this.state.seal({...data,keyPair,quota}, key);
     return Number(await this.state.client.eval('local t=redis.call("TIME"); local now=t[1]*1000+math.floor(t[2]/1000); redis.call("ZREMRANGEBYSCORE",KEYS[2],"-inf",now); if redis.call("EXISTS",KEYS[1])==1 or redis.call("ZCARD",KEYS[2])>=tonumber(ARGV[3]) then return 0 end; redis.call("SET",KEYS[1],ARGV[1],"PX",ARGV[2]); redis.call("ZADD",KEYS[2],now+tonumber(ARGV[2]),KEYS[1]); redis.call("PEXPIRE",KEYS[2],ARGV[2]); return 1', {keys:[key,quota],arguments:[raw,String(this.ttl),String(this.maxPerIP)]}))===1;
   }
   async consume(id) {
@@ -21,7 +21,7 @@ class RedisSessions {
     const key=this.state.name(this.namespace+":"+id);
     const raw=await this.state.client.get(key);
     if(!raw) return null;
-    const entry=this.state.open(raw);
+    const entry=this.state.open(raw, key);
     const taken=await this.state.client.eval('if redis.call("GET",KEYS[1])~=ARGV[1] then return 0 end; redis.call("DEL",KEYS[1]); redis.call("ZREM",KEYS[2],KEYS[1]); return 1',{keys:[key,entry.quota],arguments:[raw]});
     if(Number(taken)!==1) return null;
     entry.keyPair.privateKey=crypto.createPrivateKey({key:entry.keyPair.privateKey,type:"pkcs8",format:"der"});

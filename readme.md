@@ -118,3 +118,27 @@ Local rate limits and session stores reject new identities/sessions when full in
 Encrypted submissions require canonical base64, P-256 keys and 12-byte IVs. Missing hardware evidence earns no hardware credit, malformed telemetry fails scoring, and client timing earns no PoW bonus. Passkey-issued CAPTCHA tokens establish a verification event, not the application account identity or permission to access it.
 
 Validation: `npm test`, `npm run test:passkeys`, and `npm run test:report`. Run `npm run test:redis` with `TEST_REDIS_URL` pointing to a dedicated instance before deploying Redis changes.
+
+## Redis state security migration
+
+Encrypted Redis records are now authenticated against their full storage key
+(including namespace). Copying ciphertext between keys or namespaces is rejected.
+This closes a record-substitution weakness for an attacker with Redis write
+access; it does not protect against deletion, rollback at the same key, or a
+compromised Redis server. Keep Redis isolated and access-controlled.
+
+Credential counter updates now preserve the original expiration instead of
+renewing enrollment for another year on every authentication. Explicit TTLs
+passed to `RedisState.update` still replace the expiration.
+
+Existing encrypted records are incompatible with this change. Do not mix old
+and new instances against the same state. Before deployment, stop issuers and
+verifiers and drain outstanding tokens and challenges. Plan an offline migration
+of trusted credentials to the new authenticated format while preserving their
+remaining TTL, or require trusted re-enrollment. Never add a fallback that accepts
+unbound ciphertext. Keep replay state until all previously issued tokens expire;
+do not flush a live Redis database. Back up state before migration.
+
+Run `TEST_REDIS_URL=<dedicated-test-instance> npm run test:redis` to exercise
+cross-client atomic operations, record substitution rejection, and expiration
+preservation against a real Redis server.
