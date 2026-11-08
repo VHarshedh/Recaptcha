@@ -44,9 +44,13 @@ class NonceCache {
 
   /** Rotate buckets. */
   _rotate() {
+    const now = Date.now();
+    // Lazy rotation can run before an already-due timer callback. Both
+    // paths must respect the window or the timer can discard live nonces.
+    if (now - this._lastRotation < this._windowMs) return;
     this._previous = this._current;
     this._current = new Set();
-    this._lastRotation = Date.now();
+    this._lastRotation = now;
   }
 
   /**
